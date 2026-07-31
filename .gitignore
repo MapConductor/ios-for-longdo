@@ -1,0 +1,10 @@
+build/
+AGENTS.md
+CLAUDE.md
+Secrets.*
+.*
+!.gitignore
+!.gitkeep
+Packages/
+Package.resolved
+.build
