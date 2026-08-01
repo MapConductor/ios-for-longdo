@@ -96,6 +96,7 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
         private let moveDispatcher = LongdoCameraMoveDispatcher()
         private var didReady = false
         private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
+        private var markerAnimationOverlay: MarkerAnimationOverlayCoordinator?
         /// Last tap observed at the UIKit level. The SDK's `LocationMode.Pointer` position is
         /// vertically biased on device (safe-area handling), so click handling prefers the
         /// native touch point unprojected through our own camera math.
@@ -163,6 +164,15 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             binding.setMarkerDragObserver { [weak self] id in
                 self?.infoBubbleCoordinator?.updateInfoBubblePosition(for: id)
             }
+
+            // Screen-space marker animation layer: shares the info-bubble
+            // container (inserted below the bubbles) and the map projection.
+            let animationOverlay = MarkerAnimationOverlayCoordinator(
+                container: infoBubbleContainer,
+                project: { [weak self] point in self?.projectToScreen(point) }
+            )
+            self.markerAnimationOverlay = animationOverlay
+            binding.setMarkerAnimationOverlay(animationOverlay)
             return map
         }
 
@@ -264,6 +274,9 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
 
         func unbind() {
             moveDispatcher.cancel()
+            markerAnimationOverlay?.unbind()
+            markerAnimationOverlay = nil
+            overlayBinding?.setMarkerAnimationOverlay(nil)
             infoBubbleCoordinator?.unbind()
             infoBubbleCoordinator = nil
             infoBubbleContainer.removeFromSuperview()

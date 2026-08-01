@@ -19,6 +19,15 @@ final class LongdoMarkerController {
     /// Geo→view projection supplied by the map-view coordinator, used for tap hit-testing.
     var projector: ((GeoPointProtocol) -> CGPoint?)?
 
+    /// When set, drop/bounce animations run on the screen-space overlay layer shared with the
+    /// other providers: the icon falls from above the map's top edge down to the marker while
+    /// the native DOM marker stays hidden (mirrors android-for-longdo, where the marker layer
+    /// animates the icon in screen space).
+    var animationOverlay: MarkerAnimationOverlayCoordinator?
+
+    /// Marker ids whose overlay animation is currently running (their DOM markers stay hidden).
+    private var animatingIds: Set<String> = []
+
     /// Called whenever a marker moves during a custom drag (used to keep its info bubble attached).
     var onDragVisualUpdate: ((String) -> Void)?
 
@@ -122,7 +131,39 @@ final class LongdoMarkerController {
             states[marker.id] = marker
             addOrUpdate(marker)
             if isNew { subscribe(marker) }
+            maybeStartAnimation(marker)
         }
+    }
+
+    /// Starts the screen-space drop/bounce animation for a marker whose state requests one.
+    /// The native DOM marker is rendered hidden while the overlay animates the icon; when the
+    /// animation finishes the marker is rebuilt visible at its target. Without an overlay host
+    /// the marker is simply shown at its target (no legacy geographic interpolation on Longdo).
+    private func maybeStartAnimation(_ state: MarkerState) {
+        guard let animation = state.getAnimation() else { return }
+        guard !animatingIds.contains(state.id) else { return }
+        guard let overlay = animationOverlay else {
+            state.animate(nil)
+            addOrUpdate(state)
+            return
+        }
+        animatingIds.insert(state.id)
+        let icon = (state.icon ?? DefaultMarkerIcon()).toBitmapIcon()
+        overlay.start(MarkerAnimationOverlayEntry(
+            id: state.id,
+            state: state,
+            icon: icon,
+            animation: animation,
+            duration: animation == .Bounce ? 2.0 : 0.3,
+            onFinished: { [weak self] in
+                guard let self else { return }
+                self.animatingIds.remove(state.id)
+                state.animate(nil)
+                if self.states[state.id] != nil {
+                    self.addOrUpdate(state)
+                }
+            }
+        ))
     }
 
     /// Route an overlay event to its marker and fire the click/drag callback. Longdo delivers
@@ -173,6 +214,7 @@ final class LongdoMarkerController {
         objects.removeAll()
         subscriptions.values.forEach { $0.cancel() }
         subscriptions.removeAll()
+        animatingIds.removeAll()
     }
 
     private func addOrUpdate(_ marker: MarkerState) {
@@ -193,10 +235,15 @@ final class LongdoMarkerController {
         // DOM marker would swallow touches before they reach the map. Clicks are detected by
         // our own hit test in handleTap, and dragging is implemented as a custom long-press
         // gesture in the map view (the SDK's marker dragging is never used).
+        // Markers with a pending or running drop/bounce animation are rendered invisible: the
+        // screen-space overlay draws the falling icon and the DOM marker is rebuilt visible
+        // when the animation finishes.
+        let hidden = marker.getAnimation() != nil || animatingIds.contains(marker.id)
         let html = "<div style=\"width:0;height:0;position:relative;pointer-events:none;\">"
             + "<img src=\"data:image/png;base64,\(base64)\" "
             + "style=\"position:absolute;left:\(-anchorX)px;top:\(-anchorY)px;"
-            + "width:\(width)px;height:\(height)px;max-width:none;display:block;\"></div>"
+            + "width:\(width)px;height:\(height)px;max-width:none;display:block;"
+            + "\(hidden ? "visibility:hidden;" : "")\"></div>"
         let options: [String: Any] = [
             "icon": ["html": html],
             "draggable": false,
@@ -217,6 +264,7 @@ final class LongdoMarkerController {
                 // here for every position change would flicker and fight the drag.
                 if self.draggingMarkerId == marker.id { return }
                 self.addOrUpdate(marker)
+                self.maybeStartAnimation(marker)
             }
     }
 

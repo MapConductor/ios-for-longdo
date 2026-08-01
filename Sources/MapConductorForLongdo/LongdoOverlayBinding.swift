@@ -80,6 +80,12 @@ final class LongdoOverlayBinding {
         markerController.projector = projector
     }
 
+    /// Supplies the screen-space marker animation layer (drop/bounce) shared with the other
+    /// providers; the native DOM marker stays hidden while its icon animates on the overlay.
+    func setMarkerAnimationOverlay(_ overlay: MarkerAnimationOverlayCoordinator?) {
+        markerController.animationOverlay = overlay
+    }
+
     /// Hit-tests a map click against markers; returns true when a marker consumed the tap.
     func handleMarkerTap(_ point: GeoPoint) -> Bool {
         markerController.handleTap(point)

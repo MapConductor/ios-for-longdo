@@ -10,12 +10,11 @@ final class LongdoCircleHandle {
 }
 
 /// Renders circles as native Longdo overlays. Longdo's `longdo.Circle` radius unit is ambiguous, so
-/// a geodesic polygon ring is generated from center + radius (meters) and drawn as a
-/// `longdo.Polygon`. Hit testing is done by the core `CircleManager`.
+/// a polygon ring is generated from center + radius (meters) via the core `circleToRing` and drawn
+/// as a `longdo.Polygon`. Hit testing is done by the core `CircleManager`.
 @MainActor
 final class LongdoCircleOverlayRenderer: AbstractCircleOverlayRenderer<LongdoCircleHandle> {
     private weak var bridge: LongdoBridge?
-    private let segments = 128
 
     init(bridge: LongdoBridge?) {
         self.bridge = bridge
@@ -47,10 +46,17 @@ final class LongdoCircleOverlayRenderer: AbstractCircleOverlayRenderer<LongdoCir
 
     private func build(_ state: CircleState) -> [LongdoMap.LDObject] {
         guard let bridge, state.radiusMeters > 0 else { return [] }
-        let ring = (0..<segments).map { i -> GeoPointProtocol in
-            Spherical.computeOffset(origin: state.center, distance: state.radiusMeters, heading: 360.0 * Double(i) / Double(segments))
-        }
-        let segmentsList = longdoSegments(ring, geodesic: true, minCount: 3)
+        // Longdo native overlays are coordinate-constrained (longitudes must stay within
+        // +/-180), so normalize the core ring and split it at the antimeridian with the
+        // ring-aware splitter (avoids the wedge gap an open-path split would produce).
+        let ring = circleToRing(
+            center: state.center,
+            radiusMeters: state.radiusMeters,
+            geodesic: state.geodesic
+        )
+        let segmentsList = splitRingByMeridian(ring.map { $0.normalize() }, geodesic: state.geodesic)
+            .filter { $0.count >= 3 }
+            .map { fragment in fragment.map { $0.clLocation } }
         guard !segmentsList.isEmpty else { return [] }
         let options: [String: Any] = [
             "lineWidth": state.strokeWidth,
