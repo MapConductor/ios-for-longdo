@@ -11,6 +11,10 @@ protocol LongdoBridge: AnyObject {
     func ldstatic(_ type: String, with name: String) -> LongdoMap.LDStatic
     @discardableResult func call(_ method: String, args: [Any]?) -> Any?
     @discardableResult func objectCall(_ object: LongdoMap.LDObject, method: String, args: [Any]?) -> Any?
+    /// Evaluates raw JavaScript in the Longdo map's WebView. Used to add a MapLibre-GL raster
+    /// source/layer directly to the underlying map (`map.Renderer`) — the marker-tile overlay,
+    /// mirroring android-for-longdo which injects the same source/layer via `longdoMap.run(js)`.
+    func runJavaScript(_ js: String)
 }
 
 /// Shared helpers for the Longdo overlay renderers. With the native SDK, geometry is passed as

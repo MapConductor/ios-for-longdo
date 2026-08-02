@@ -23,7 +23,17 @@ final class LongdoOverlayBinding {
     private var ready = false
     private var lastMarkers: [MarkerState] = []
 
+    /// Bridge kept to build the marker-tile Custom layer lazily (created only for large sets).
+    private weak var bridge: LongdoBridge?
+    /// Marker tiling options from the latest content sync.
+    private var lastTiling: MarkerTilingOptions = .Disabled
+    /// Latest camera, used to derive the native zoom for tiled-marker tap hit-testing.
+    private var lastCamera: MapCameraPosition?
+    /// Renders large, non-interactive marker sets as raster tiles (created on demand).
+    private var markerTileRenderer: LongdoMarkerTileRenderer?
+
     init(bridge: LongdoBridge, scope: MapOverlayScope, controller: LongdoViewController) {
+        self.bridge = bridge
         self.scope = scope
         self.polylineController = LongdoPolylineController(bridge: bridge)
         self.polygonController = LongdoPolygonController(bridge: bridge)
@@ -52,7 +62,8 @@ final class LongdoOverlayBinding {
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
         lastMarkers = content.markers.map { $0.state }
-        if ready { markerController.sync(lastMarkers) }
+        lastTiling = content.markerTilingOptions
+        if ready { applyMarkers() }
     }
 
     /// Mark the map ready: flush gated collectors and apply markers now the SDK can accept overlays.
@@ -63,10 +74,37 @@ final class LongdoOverlayBinding {
         scope.circleCollector.flush()
         scope.groundImageCollector.flush()
         scope.rasterLayerCollector.flush()
-        markerController.sync(lastMarkers)
+        applyMarkers()
+    }
+
+    /// Routes markers to the raster-tile path (large, non-interactive sets) or the interactive
+    /// DOM-marker path. Draggable/animated markers always stay on the DOM path (a raster tile
+    /// cannot be dragged/animated); the rest tile once they exceed `minMarkerCount`. Mirrors
+    /// android-for-longdo's `useMarkerLayer` split so the "Bunch of markers" page renders one
+    /// raster layer instead of thousands of DOM markers.
+    private func applyMarkers() {
+        let interactive = lastMarkers.filter { $0.draggable || $0.getAnimation() != nil }
+        let tileable = lastMarkers.filter { !$0.draggable && $0.getAnimation() == nil }
+        let useTiling = lastTiling.enabled && tileable.count >= lastTiling.minMarkerCount
+        if useTiling {
+            ensureMarkerTileRenderer().render(tileable)
+            markerController.sync(interactive)
+        } else {
+            markerTileRenderer?.clear()
+            markerTileRenderer = nil
+            markerController.sync(lastMarkers)
+        }
+    }
+
+    private func ensureMarkerTileRenderer() -> LongdoMarkerTileRenderer {
+        if let markerTileRenderer { return markerTileRenderer }
+        let renderer = LongdoMarkerTileRenderer(bridge: bridge, tilingOptions: lastTiling)
+        markerTileRenderer = renderer
+        return renderer
     }
 
     func setCurrentCamera(_ camera: MapCameraPosition) {
+        lastCamera = camera
         polylineController.setCurrentCameraPosition(camera)
     }
 
@@ -87,8 +125,18 @@ final class LongdoOverlayBinding {
     }
 
     /// Hit-tests a map click against markers; returns true when a marker consumed the tap.
+    /// Interactive DOM markers are tested first, then (for large sets) the tiled markers via a
+    /// geo-distance hit-test at the current native zoom.
     func handleMarkerTap(_ point: GeoPoint) -> Bool {
-        markerController.handleTap(point)
+        if markerController.handleTap(point) { return true }
+        if let tileRenderer = markerTileRenderer, let camera = lastCamera {
+            let nativeZoom = LongdoViewController.coreZoomToLongdo(camera.zoom)
+            if let hit = tileRenderer.findMarkerAt(point, nativeZoom: nativeZoom) {
+                if hit.clickable { hit.onClick?(hit) }
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Custom marker drag (long-press pickup)
@@ -137,6 +185,8 @@ final class LongdoOverlayBinding {
 
     func unbind() {
         markerController.clear()
+        markerTileRenderer?.clear()
+        markerTileRenderer = nil
         Task {
             await polylineController.clear()
             await polygonController.clear()

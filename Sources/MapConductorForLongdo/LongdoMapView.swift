@@ -310,6 +310,10 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             map?.objectCall(ldobject: object, method: method, args: args)
         }
 
+        func runJavaScript(_ js: String) {
+            map?.evaluateJavaScript(js, completionHandler: nil)
+        }
+
         // MARK: - Ready / events
 
         private func handleReady() {

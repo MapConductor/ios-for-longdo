@@ -44,7 +44,6 @@ final class LongdoMarkerController {
     /// when a marker consumed the tap.
     func handleTap(_ point: GeoPoint) -> Bool {
         guard let projector, let tapPoint = projector(point) else { return false }
-        NSLog("tap point at : %@", String(point.toUrlValue()))
         guard let id = markerId(at: tapPoint, where: { $0.clickable }), let state = states[id] else { return false }
         state.onClick?(state)
         return true
