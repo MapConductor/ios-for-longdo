@@ -23,6 +23,13 @@ final class LongdoOverlayBinding {
     private var ready = false
     private var lastMarkers: [MarkerState] = []
 
+    /// クラスタリングが接続されている間の描画対象。`nil` のときは通常の `content.markers`。
+    ///
+    /// android-for-longdo では `LongdoClusterMarkerRenderer` が `_markers` フローを
+    /// 差し替えることでコンポーズオーバーレイの描画対象を切り替えている。iOS も同じく、
+    /// クラスタ側が算出した「クラスタ＋可視単体」だけを描くために content のマーカーを覆う。
+    private var clusterMarkers: [MarkerState]?
+
     /// Bridge kept to build the marker-tile Custom layer lazily (created only for large sets).
     private weak var bridge: LongdoBridge?
     /// Marker tiling options from the latest content sync.
@@ -66,6 +73,12 @@ final class LongdoOverlayBinding {
         if ready { applyMarkers() }
     }
 
+    /// クラスタリングが算出したマーカー一覧を反映する。`nil` を渡すと通常の content 経路へ戻す。
+    func setClusterMarkers(_ markers: [MarkerState]?) {
+        clusterMarkers = markers
+        if ready { applyMarkers() }
+    }
+
     /// Mark the map ready: flush gated collectors and apply markers now the SDK can accept overlays.
     func markReady() {
         ready = true
@@ -83,6 +96,14 @@ final class LongdoOverlayBinding {
     /// android-for-longdo's `useMarkerLayer` split so the "Bunch of markers" page renders one
     /// raster layer instead of thousands of DOM markers.
     private func applyMarkers() {
+        // クラスタ接続中はクラスタ側の算出結果だけを描く。タイル化はクラスタと二重に
+        // 間引くことになるので行わない（android も同様にコンポーズオーバーレイへ直行する）。
+        if let clusterMarkers {
+            markerTileRenderer?.clear()
+            markerTileRenderer = nil
+            markerController.sync(clusterMarkers)
+            return
+        }
         let interactive = lastMarkers.filter { $0.draggable || $0.getAnimation() != nil }
         let tileable = lastMarkers.filter { !$0.draggable && $0.getAnimation() == nil }
         let useTiling = lastTiling.enabled && tileable.count >= lastTiling.minMarkerCount

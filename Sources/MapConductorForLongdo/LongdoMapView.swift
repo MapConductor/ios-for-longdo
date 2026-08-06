@@ -14,11 +14,13 @@ public struct LongdoMapView: View {
 
     private let apiKey: String?
     private let handlers: MapViewHandlers<LongdoViewState>
+    private let cameraRestriction: CameraRestriction?
     private let content: () -> MapViewContent
 
     public init(
         state: LongdoViewState,
         apiKey: String? = nil,
+        cameraRestriction: CameraRestriction? = nil,
         onMapLoaded: OnMapLoadedHandler<LongdoViewState>? = nil,
         onMapClick: OnMapEventHandler? = nil,
         onMapLongClick: OnMapEventHandler? = nil,
@@ -30,6 +32,7 @@ public struct LongdoMapView: View {
     ) {
         self.state = state
         self.apiKey = apiKey
+        self.cameraRestriction = cameraRestriction
         self.handlers = MapViewHandlers(
             onMapLoaded: onMapLoaded,
             onMapClick: onMapClick,
@@ -43,7 +46,13 @@ public struct LongdoMapView: View {
     }
 
     public var body: some View {
-        let mapContent = content()
+        // The provider's registry is in scope only while content is being assembled —
+        // the same window in which Compose provides `LocalMapServiceRegistry` around the
+        // content lambda. Bracketing the pass lets a removed plugin be noticed.
+        let support = state.serviceRegistry.get(MarkerRenderingSupportKey.self)
+        support?.beginContentPass()
+        let mapContent = MapServiceRegistryScope.with(state.serviceRegistry) { content() }
+        support?.endContentPass()
         return MapViewBase(
             attributionRules: state.mapDesignType.attributionRules,
             camera: state.cameraPosition,
@@ -51,6 +60,7 @@ public struct LongdoMapView: View {
         ) {
             LongdoMapViewRepresentable(
                 state: state,
+                cameraRestriction: cameraRestriction,
                 apiKey: apiKey,
                 handlers: handlers,
                 content: mapContent
@@ -61,6 +71,7 @@ public struct LongdoMapView: View {
 
 private struct LongdoMapViewRepresentable: UIViewRepresentable {
     @ObservedObject var state: LongdoViewState
+    let cameraRestriction: CameraRestriction?
 
     let apiKey: String?
     let handlers: MapViewHandlers<LongdoViewState>
@@ -80,6 +91,9 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: LongdoMap, context: Context) {
+        // 制限値が変わったときだけ再適用する。
+        context.coordinator.applyCameraRestriction(cameraRestriction)
+        context.coordinator.updateGestures(state.uiSettings)
         context.coordinator.updateContent(content)
     }
 
@@ -91,10 +105,36 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
     final class Coordinator: MapViewCoordinatorBase<LongdoViewState>, LongdoBridge, UIGestureRecognizerDelegate {
         private var map: LongdoMap?
         private var controller: LongdoViewController?
+
+        /// android-sdk の `cameraRestriction?.let { controller.setCameraRestriction(it) }` 相当。
+        func applyCameraRestriction(_ restriction: CameraRestriction?) {
+            applyCameraRestriction(restriction, to: controller)
+        }
         private var overlayScope: MapOverlayScope?
+
+        /// マーカークラスタリング等のプラグインへ公開する描画 capability。
+        /// android-for-longdo が `MarkerRenderingSupportKey` に登録するのと同じ役割。
+        /// クラスタ側が算出したマーカーは `LongdoClusterMarkerRenderer` が集約し、
+        /// `LongdoOverlayBinding` の DOM マーカー経路へ流す。
+        private lazy var strategyManager: StrategyMarkerManager<LongdoActualMarker, LongdoClusterMarkerRenderer> = {
+            let manager = StrategyMarkerManager<LongdoActualMarker, LongdoClusterMarkerRenderer>(
+                makeRenderer: { [weak self] _ in
+                    LongdoClusterMarkerRenderer(onMarkersChanged: { [weak self] markers in
+                        self?.overlayBinding?.setClusterMarkers(markers)
+                    })
+                },
+                shouldAddMarkers: { [weak self] in self?.didReady ?? false },
+                currentCamera: { [weak self] in self?.lastOverlayCamera }
+            )
+            return manager
+        }()
+
+        /// クラスタ再計算に渡す直近のカメラ（可視領域つき）。
+        private var lastOverlayCamera: MapCameraPosition?
         private var overlayBinding: LongdoOverlayBinding?
         private let moveDispatcher = LongdoCameraMoveDispatcher()
         private var didReady = false
+        private var lastUISettings = MapUISettings()
         private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
         private var markerAnimationOverlay: MarkerAnimationOverlayCoordinator?
         /// Last tap observed at the UIKit level. The SDK's `LocationMode.Pointer` position is
@@ -105,6 +145,15 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
         private var markerDragRecognizer: UILongPressGestureRecognizer?
 
         func makeMap(apiKey explicit: String?) -> LongdoMap {
+            // SwiftUI は同じ Coordinator に対して `makeUIView` を複数回呼ぶことがあり
+            // （content が更新されるページで実際に 3 回呼ばれる）、そのたびに新しい
+            // `LongdoMap` を作ると、ビュー階層に載っているのは最初の 1 個だけで
+            // `self.map` は誰にも表示されない孤児を指すことになる。以降のブリッジ呼び出し
+            // （`Overlays.add` / `bound` / `location`）はすべてその見えないマップへ向かい、
+            // マーカーはレイアウトされていない 0×0 の WebView の DOM に追加されて
+            // 画面に出ない。Coordinator 1 つにつきマップは 1 つとし、2 回目以降は
+            // 生成済みのものを返す（破棄は `dismantleUIView` → `unbind()` で map = nil）。
+            if let existing = map { return existing }
             let map = LongdoMap()
             self.map = map
             map.apiKey = LongdoInitSDK.resolveApiKey(explicit) ?? ""
@@ -280,6 +329,9 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             infoBubbleCoordinator?.unbind()
             infoBubbleCoordinator = nil
             infoBubbleContainer.removeFromSuperview()
+            // クラスタ用レンダラ／コントローラも破棄する。
+            strategyManager.clear()
+            overlayBinding?.setClusterMarkers(nil)
             overlayBinding?.unbind()
             overlayBinding = nil
             overlayScope?.clear()
@@ -316,11 +368,57 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
 
         // MARK: - Ready / events
 
+        /// Longdo runs inside a web view, so gestures are toggled through its JS
+        /// API rather than a native property. Applied on every update and re-applied
+        /// once the page reports ready, since calls before that are dropped.
+        /// Longdo's JS API only gates *mouse* input (`map.Ui.Mouse`), so these flags
+        /// take effect with a trackpad or mouse but not for touch drags:
+        /// `map.rotate()` / `map.pitch()` set the camera angle rather than gating a
+        /// gesture, and native touch interception was tried and does not win against
+        /// the web view's own handling. Touch gating is therefore unsupported here.
+        func updateGestures(_ ui: MapUISettings) {
+            lastUISettings = ui
+            MapUISettingsDiagnostics.warnIfRequested(
+                ui.rotateGesture,
+                gesture: .rotate,
+                provider: "Longdo",
+                reason: "the Longdo JS API has no rotation gesture toggle (map.rotate only sets the angle)"
+            )
+            MapUISettingsDiagnostics.warnIfRequested(
+                ui.tiltGesture,
+                gesture: .tilt,
+                provider: "Longdo",
+                reason: "the Longdo JS API has no tilt gesture toggle (map.pitch only sets the angle)"
+            )
+            guard didReady else { return }
+            let js = """
+            (function(){
+              try {
+                var m = window.map;
+                if (!m || !m.Ui || !m.Ui.Mouse) return;
+                m.Ui.Mouse.enableDrag(\(ui.scrollGesture));
+                m.Ui.Mouse.enableWheel(\(ui.zoomGesture));
+              } catch (e) {}
+            })()
+            """
+            map?.evaluateJavaScript(js, completionHandler: nil)
+        }
+
         private func handleReady() {
             guard !didReady else { return }
             didReady = true
             controller?.onMapReady()
             state.setController(controller)
+            // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
+            // from the registry; this provider never learns that clustering exists.
+            // 再バインド時に前回の capability が残らないよう、登録前に空にする
+            // （android-sdk の各 *MapView.kt が `registry.clear()` してから put するのと同じ）。
+            state.serviceRegistry.clear()
+            state.serviceRegistry.put(MarkerRenderingSupportKey.self, strategyManager)
+            strategyManager.flush()
+            // Longdo のコントローラはマップ準備完了後に有効になるため、それまでに要求された
+            // cameraRestriction をここで適用する。
+            reapplyCameraRestriction(to: controller)
             // Disable Longdo's own long-press popup (context menu, DOM class
             // .ldmap-contextmenu): long-pressing a marker or the map would otherwise show the
             // SDK's coordinate balloon. The bridge call Ui.ContextMenu.visible(false) has no
@@ -335,6 +433,7 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             })()
             """
             map?.evaluateJavaScript(disableContextMenu, completionHandler: nil)
+            updateGestures(lastUISettings)
             bindEvents()
             overlayBinding?.markReady()
             controller?.notifyMapInitialized()
@@ -369,6 +468,26 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             }
         }
 
+        /// Longdo JS API の `map.bound()`（引数なしで現在の表示範囲を返す）から可視領域を組み立てる。
+        /// 四隅は Longdo が矩形しか返さないため nil（android-for-longdo も同じく bounds だけを渡す）。
+        private static func visibleRegion(from map: LongdoMap) -> MapConductorCore.VisibleRegion? {
+            guard let raw = map.call(method: "bound", args: nil) as? [String: Any],
+                  let minLat = doubleValue(raw["minLat"]),
+                  let maxLat = doubleValue(raw["maxLat"]),
+                  let minLon = doubleValue(raw["minLon"]),
+                  let maxLon = doubleValue(raw["maxLon"]) else { return nil }
+            return MapConductorCore.VisibleRegion(
+                bounds: GeoRectBounds(
+                    southWest: GeoPoint(latitude: minLat, longitude: minLon, altitude: 0),
+                    northEast: GeoPoint(latitude: maxLat, longitude: maxLon, altitude: 0)
+                ),
+                nearLeft: nil,
+                nearRight: nil,
+                farLeft: nil,
+                farRight: nil
+            )
+        }
+
         private func emitCamera() {
             guard let map else { return }
             guard let loc = map.call(method: "location", args: nil) as? CLLocationCoordinate2D else { return }
@@ -380,10 +499,21 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
                 zoom: LongdoViewController.longdoZoomToCore(zoom),
                 bearing: rotate,
                 tilt: pitch,
-                paddings: state.cameraPosition.paddings
+                paddings: state.cameraPosition.paddings,
+                // マーカークラスタリングは `visibleRegion.bounds` で表示範囲内のマーカーを
+                // 絞り込むため、ここで付けないとクラスタが一切描画されない
+                // （android-for-longdo も onCameraMove の bounds から同じものを組み立てている）。
+                visibleRegion: Self.visibleRegion(from: map)
             )
+            // 範囲・ズーム制限に違反していれば矩形内へ引き戻す。再適用で再度この経路を通り、
+            // そこでは補正不要になり通常フローへ進む。android-sdk と同じく、補正した回は
+            // state 更新もコールバックも行わない。
+            if controller?.applyCameraRestrictionCorrectionIfNeeded(updated) == true { return }
             state.updateCameraPosition(updated)
+            lastOverlayCamera = updated
             overlayBinding?.setCurrentCamera(updated)
+            // クラスタは visibleRegion.bounds を使って再計算する。
+            Task { [weak self] in await self?.strategyManager.onCameraChanged(updated) }
             // Bubbles must track the map on every camera event, including suppressed echoes.
             invalidateProjectionCamera()
             infoBubbleCoordinator?.updateAllLayouts()
@@ -527,3 +657,4 @@ final class LongdoCameraMoveDispatcher {
         moving = false
     }
 }
+

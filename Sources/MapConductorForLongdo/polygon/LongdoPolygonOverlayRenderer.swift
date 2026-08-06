@@ -44,7 +44,19 @@ final class LongdoPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<LongdoP
 
     func reapply(_ handles: [LongdoPolygonHandle]) {}
 
-    private func build(_ state: PolygonState) -> [LongdoMap.LDObject] {
+    /// 複数の穴が重なっている場合は結合（union）して重複を解消する。
+    /// 他プロバイダ（MapLibre/MapTiler 等）と同じ `unionHoles()` を用いる。
+    ///
+    /// Longdo（内部 MapLibre GL）の nil 区切りリングは偶奇規則なので、重なった穴は
+    /// 打ち消し合い、重なり部分が塗られてしまう。コンポーネント層（`Polygon`）のユニオンは
+    /// state 1 インスタンスにつき 1 回きりで、頂点ドラッグ後の `state.holes` 差し替えには
+    /// 追従しないため、android-for-longdo と同じくここでも結合する。
+    private func resolveHoles(_ state: PolygonState) -> PolygonState {
+        state.holes.count > 1 ? state.unionHoles() : state
+    }
+
+    private func build(_ rawState: PolygonState) -> [LongdoMap.LDObject] {
+        let state = resolveHoles(rawState)
         guard let bridge, state.points.count >= 3 else { return [] }
         let outerSegments = longdoSegments(state.points, geodesic: state.geodesic, minCount: 3)
         guard !outerSegments.isEmpty else { return [] }

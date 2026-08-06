@@ -18,6 +18,15 @@ final class LongdoViewController: MapViewControllerProtocol {
     private var cameraMoveStartListener: OnCameraMoveHandler?
     private var cameraMoveListener: OnCameraMoveHandler?
     private var cameraMoveEndListener: OnCameraMoveHandler?
+
+    /// Longdo はネイティブのカメラ範囲制限 API を（統一ズームの体系で）持たないため、
+    /// android-sdk の HERE/ArcGIS/TomTom と同じくカメラ停止時に矩形内へクランプして
+    /// 再適用する方式で制限する。
+    private let cameraRestrictionClamp = CameraRestrictionClamp()
+
+    func setCameraRestriction(_ restriction: CameraRestriction?) {
+        cameraRestrictionClamp.set(restriction)
+    }
     private var mapClickListener: OnMapEventHandler?
     private var mapLongClickListener: OnMapEventHandler?
     private var mapInitializedListener: OnMapInitializedHandler?
@@ -215,6 +224,17 @@ final class LongdoViewController: MapViewControllerProtocol {
     func notifyCameraMoveStart(_ cameraPosition: MapCameraPosition) { cameraMoveStartListener?(cameraPosition) }
     func notifyCameraMove(_ cameraPosition: MapCameraPosition) { cameraMoveListener?(cameraPosition) }
     func notifyCameraMoveEnd(_ cameraPosition: MapCameraPosition) { cameraMoveEndListener?(cameraPosition) }
+
+    /// カメラ停止時に制限違反を補正する。補正したら `true`。
+    ///
+    /// android-sdk は補正時に `cameraMoveEndCallback` を呼ばずに return するので、アプリ側は
+    /// 範囲外のカメラを観測しない。iOS はカメラ通知経路がビュー側にもあるため、ビューが
+    /// まずこれを呼び、`true` なら state 更新・リスナー通知をまとめてスキップする。
+    func applyCameraRestrictionCorrectionIfNeeded(_ current: MapCameraPosition) -> Bool {
+        guard let corrected = cameraRestrictionClamp.correction(for: current) else { return false }
+        moveCamera(position: corrected)
+        return true
+    }
     func notifyMapClick(_ point: GeoPoint) {
         mapClickListener?(point)
     }

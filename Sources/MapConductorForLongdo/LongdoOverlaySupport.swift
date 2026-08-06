@@ -28,7 +28,7 @@ extension GeoPointProtocol {
 /// Interpolates a path (geodesic or linear), normalizes points, splits at the antimeridian, and
 /// returns each continuous segment as `CLLocationCoordinate2D` arrays.
 func longdoSegments(_ points: [GeoPointProtocol], geodesic: Bool, minCount: Int) -> [[CLLocationCoordinate2D]] {
-    let interpolated = (geodesic ? createInterpolatePoints(points) : createLinearInterpolatePoints(points)).map { $0.normalize() }
+    let interpolated = (geodesic ? WGS84Geodesic.createInterpolatePoints(points) : Planar.createInterpolatePoints(points)).map { $0.normalize() }
     return splitByMeridian(interpolated, geodesic: geodesic)
         .filter { $0.count >= minCount }
         .map { seg in seg.map { $0.clLocation } }
@@ -37,5 +37,5 @@ func longdoSegments(_ points: [GeoPointProtocol], geodesic: Bool, minCount: Int)
 /// Interpolates a single ring (no antimeridian split) to `CLLocationCoordinate2D` (used for polygon
 /// holes, which Longdo draws as nil-separated additional rings).
 func longdoRingCoords(_ points: [GeoPointProtocol], geodesic: Bool) -> [CLLocationCoordinate2D] {
-    (geodesic ? createInterpolatePoints(points) : createLinearInterpolatePoints(points)).map { $0.normalize().clLocation }
+    (geodesic ? WGS84Geodesic.createInterpolatePoints(points) : Planar.createInterpolatePoints(points)).map { $0.normalize().clLocation }
 }

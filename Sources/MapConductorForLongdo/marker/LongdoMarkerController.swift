@@ -99,14 +99,13 @@ final class LongdoMarkerController {
         var best: (id: String, distance: CGFloat)?
         for (id, state) in states where predicate(state) {
             guard let markerPoint = projector(state.position) else { continue }
-            let icon = (state.icon ?? DefaultMarkerIcon()).toBitmapIcon()
-            let rect = CGRect(
-                x: markerPoint.x - icon.size.width * icon.anchor.x,
-                y: markerPoint.y - icon.size.height * icon.anchor.y,
-                width: icon.size.width,
-                height: icon.size.height
-            ).insetBy(dx: -6, dy: -6)
-            guard rect.contains(screenPoint) else { continue }
+            // アイコン矩形 + tapTolerance。以前は許容量が 6pt 固定で、他プロバイダの
+            // `Settings.Default.tapTolerance`（14pt）より当たり判定が狭かった。
+            guard MarkerHitTest.hitsIcon(
+                touchScreen: screenPoint,
+                markerScreen: markerPoint,
+                state: state
+            ) else { continue }
             let dx = screenPoint.x - markerPoint.x
             let dy = screenPoint.y - markerPoint.y
             let distance = dx * dx + dy * dy
