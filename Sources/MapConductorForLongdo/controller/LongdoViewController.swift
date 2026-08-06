@@ -12,6 +12,11 @@ final class LongdoViewController: MapViewControllerProtocol {
     let typedHolder: LongdoMapViewHolder
     let coroutine = CoroutineScope()
 
+    /// この地図に紐づくオーバーレイコントローラの登録簿。
+    /// 拡張モジュール（ヒートマップ、マーカークラスタリング等）がここに登録して
+    /// カメラ変更を受け取る。`MapViewControllerProtocol` の要件。
+    let overlayControllers = OverlayControllerRegistry()
+
     private weak var bridge: LongdoBridge?
     private let zoomConverter = ZoomAltitudeConverter()
 
@@ -223,7 +228,11 @@ final class LongdoViewController: MapViewControllerProtocol {
 
     func notifyCameraMoveStart(_ cameraPosition: MapCameraPosition) { cameraMoveStartListener?(cameraPosition) }
     func notifyCameraMove(_ cameraPosition: MapCameraPosition) { cameraMoveListener?(cameraPosition) }
-    func notifyCameraMoveEnd(_ cameraPosition: MapCameraPosition) { cameraMoveEndListener?(cameraPosition) }
+    func notifyCameraMoveEnd(_ cameraPosition: MapCameraPosition) {
+        // 登録済みオーバーレイ（拡張モジュール含む）へ伝播する。
+        overlayControllers.dispatchCameraChanged(cameraPosition)
+        cameraMoveEndListener?(cameraPosition)
+    }
 
     /// カメラ停止時に制限違反を補正する。補正したら `true`。
     ///

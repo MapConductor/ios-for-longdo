@@ -322,6 +322,9 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
         }
 
         func unbind() {
+            // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
+            // ここで外さないと破棄済みのコントローラを掴んだまま残る。
+            state.serviceRegistry.removeProviderRegistrations()
             moveDispatcher.cancel()
             markerAnimationOverlay?.unbind()
             markerAnimationOverlay = nil
@@ -336,6 +339,8 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             overlayBinding = nil
             overlayScope?.clear()
             overlayScope = nil
+            // 登録済みオーバーレイコントローラ（拡張モジュール含む）を破棄する。
+            controller?.destroy()
             state.setController(nil)
             state.setMapViewHolder(nil)
             controller = nil
@@ -411,10 +416,12 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             state.setController(controller)
             // Publish marker rendering as a map-scoped capability. Add-on modules resolve it
             // from the registry; this provider never learns that clustering exists.
-            // 再バインド時に前回の capability が残らないよう、登録前に空にする
-            // （android-sdk の各 *MapView.kt が `registry.clear()` してから put するのと同じ）。
-            state.serviceRegistry.clear()
             state.serviceRegistry.put(MarkerRenderingSupportKey.self, strategyManager)
+            // 拡張モジュール（ヒートマップ等）がオーバーレイコントローラを登録できるようにする。
+            // clear() の後に置くこと（先に置くと直後の clear() で消える）。
+            if let controller {
+                state.serviceRegistry.put(OverlayControllerRegistryKey.self, controller.overlayControllers)
+            }
             strategyManager.flush()
             // Longdo のコントローラはマップ準備完了後に有効になるため、それまでに要求された
             // cameraRestriction をここで適用する。

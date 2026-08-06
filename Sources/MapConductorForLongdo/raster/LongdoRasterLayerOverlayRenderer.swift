@@ -20,7 +20,8 @@ final class LongdoRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     }
 
     override func createLayer(state: RasterLayerState) async -> LongdoRasterLayerHandle? {
-        LongdoRasterLayerHandle(object: build(state))
+        RasterHeaderRuleSet.warnUnsupported(provider: "Longdo", state: state)
+        return LongdoRasterLayerHandle(object: build(state))
     }
 
     override func updateLayerProperties(
