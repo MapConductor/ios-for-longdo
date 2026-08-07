@@ -58,7 +58,8 @@ final class LongdoMarkerTileRenderer {
         markerManager.clear()
         for state in markers {
             markerManager.registerEntity(
-                MarkerEntity(marker: nil, state: state, visible: true, isRendered: true)
+                // このマネージャはタイル専用なので全件がタイル担当。
+                MarkerEntity(marker: nil, state: state, visible: true, isRendered: true, tiling: true)
             )
         }
         if markerManager.allEntities().isEmpty {
