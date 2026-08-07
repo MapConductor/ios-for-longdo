@@ -1,7 +1,7 @@
 import Foundation
 import MapConductorCore
 
-/// マーカークラスタリング（`MapConductorMarkerCluster`）用のマーカーレンダラ。
+/// マーカークラスタリング（`MapConductorMarkerClustering`）用のマーカーレンダラ。
 ///
 /// android-for-longdo の `LongdoClusterMarkerRenderer.kt` の移植。
 ///
