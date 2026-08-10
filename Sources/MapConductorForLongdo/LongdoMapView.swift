@@ -202,6 +202,7 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             self.infoBubbleCoordinator = InfoBubbleOverlayCoordinator(
                 container: infoBubbleContainer,
                 project: { [weak self] point in self?.projectToScreen(point) },
+                projectionGate: screenProjectionGate(feature: "InfoBubble"),
                 resolveMarkerStateForIcon: { [weak binding] id, bubbleMarker in
                     binding?.markerState(for: id) ?? bubbleMarker
                 },
@@ -218,7 +219,8 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             // container (inserted below the bubbles) and the map projection.
             let animationOverlay = MarkerAnimationOverlayCoordinator(
                 container: infoBubbleContainer,
-                project: { [weak self] point in self?.projectToScreen(point) }
+                project: { [weak self] point in self?.projectToScreen(point) },
+                projectionGate: screenProjectionGate(feature: "marker animation overlay")
             )
             self.markerAnimationOverlay = animationOverlay
             binding.setMarkerAnimationOverlay(animationOverlay)
@@ -422,6 +424,20 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             if let controller {
                 state.serviceRegistry.put(OverlayControllerRegistryKey.self, controller.overlayControllers)
             }
+            // ホルダーは同期の座標変換を持たない（WebView ブリッジ越しのため nil を返す）。
+            // ただしオーバーレイの配置は JS 側の独自経路で行っており、InfoBubble も
+            // マーカーも実際に動く。
+            //
+            // よって Unsupported ではなく Degraded。Unsupported にすると
+            // ScreenProjectionRequirement がスクリーン空間の機能を落としてしまい、
+            // 動いているものを止めることになる。android-for-longdo と同じ判断。
+            state.serviceRegistry.declare(
+                .screenProjectionSync,
+                .degraded(
+                    "the holder API has no synchronous conversion; overlays are placed "
+                        + "through the Longdo JS bridge instead"
+                )
+            )
             strategyManager.flush()
             // Longdo のコントローラはマップ準備完了後に有効になるため、それまでに要求された
             // cameraRestriction をここで適用する。
