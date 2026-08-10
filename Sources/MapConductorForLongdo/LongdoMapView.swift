@@ -624,9 +624,13 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
             guard let point = Self.geoPoint(from: result) else { return }
             // Markers are hit-tested from the click coordinates (their DOM elements pass taps
             // through); a consumed tap behaves like the other providers — no map-click.
+            // marker → circle → groundImage → polyline → polygon → map の一本道。
+            // **必ずどれか 1 つだけ**が配送される。
+            // 移行前はここで onMapClick を無条件に先に呼んでいたため、オーバーレイに
+            // 当たっても地図クリックが飛んでいた（二重配送）。
             if overlayBinding?.handleMarkerTap(point) == true { return }
+            if overlayBinding?.handleTap(point) == true { return }
             onMapClick?(point)
-            overlayBinding?.handleTap(point)
             controller?.notifyMapClick(point)
         }
 
