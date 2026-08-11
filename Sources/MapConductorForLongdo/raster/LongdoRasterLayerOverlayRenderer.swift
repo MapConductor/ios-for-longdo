@@ -45,6 +45,10 @@ final class LongdoRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
     private func build(_ state: RasterLayerState) -> LongdoMap.LDObject? {
         guard let bridge else { return nil }
         switch state.source {
+        // ラスターの `tileSize` は渡していない。Longdo の `Layer` は 256 固定で、
+        // options に `tileSize` を足しても**何も変わらないことを実測で確認した**
+        // （地図ズーム 13 で要求されるタイルは z=13 のまま、線の太さも 10px のまま）。
+        // 結果として 512 のタイルが 256 の枠に入り、中身は半分の大きさで描かれる。
         case let .urlTemplate(template, _, minZoom, maxZoom, _, _):
             var options: [String: Any] = [
                 "type": bridge.ldstatic("LayerType", with: "Custom"),
