@@ -232,6 +232,25 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         return GeoPoint(latitude: lat, longitude: lon, altitude: 0)
     }
 
+    /// 地図を作り、制限とコンテンツまで流して返す。
+    ///
+    /// SwiftUI の `makeUIView` が踏んでいた手順をそのまま公開したもの。
+    /// React Native のような非 SwiftUI ホストも同じ入口を通る
+    /// （`MapLibreMapHost.makeMapView` と同じ位置づけ）。
+    public func makeMapView(
+        apiKey: String?,
+        cameraRestriction: CameraRestriction?,
+        content: MapViewContent
+    ) -> LongdoMap {
+        if let sdkInitialize = handlers.sdkInitialize {
+            Self.runOnce(sdkInitialize)
+        }
+        let map = makeMap(apiKey: apiKey)
+        applyCameraRestriction(cameraRestriction)
+        updateContent(content)
+        return map
+    }
+
     public func updateContent(_ content: MapViewContent) {
         overlayBinding?.sync(content)
         infoBubbleCoordinator?.syncInfoBubbles(content.infoBubbles)

@@ -82,12 +82,12 @@ private struct LongdoMapViewRepresentable: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> LongdoMap {
-        let map = context.coordinator.makeMap(apiKey: apiKey)
-        context.coordinator.updateContent(content)
-        if let sdkInitialize = handlers.sdkInitialize {
-            LongdoMapHost.runOnce(sdkInitialize)
-        }
-        return map
+        // RN のホストと同じ入口を通す。手順が二重になっていると片方だけ直る。
+        context.coordinator.makeMapView(
+            apiKey: apiKey,
+            cameraRestriction: cameraRestriction,
+            content: content
+        )
     }
 
     func updateUIView(_ uiView: LongdoMap, context: Context) {
