@@ -170,66 +170,49 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     /// the arguments/return value and always yields (0,0). The camera zoom is Google-parity
     /// (256·2^zoom pt world width), so this matches the WebView's rendering; tilt is not
     /// modeled (the tilted-map case is approximate).
+    ///
+    /// **投影を持つのはこのホストであって、ホルダーではない。**
+    /// `LongdoMapViewHolder.toScreenOffset` は WebView ブリッジに同期 API が無いため
+    /// nil を返すが、投影自体はここのカメラ計算で成立している。InfoBubble も
+    /// マーカー追従もこの経路で動く（だから `screenProjectionSync` は
+    /// unsupported ではなく degraded と宣言している）。
+    /// SwiftUI を通さないホスト（React Native）も**ここを呼ぶこと**。
+    /// 各ホストが投影を書き直すと、片方だけ直る／片方だけずれる。
+    public func toScreenOffset(_ point: GeoPointProtocol) -> CGPoint? {
+        projectToScreen(point)
+    }
+
+    /// ``toScreenOffset(_:)`` の逆。スクリーン座標 → 地理座標。
+    /// タップの当たり判定はこれを通す。**SDK 側のタッチ判定は使わない**
+    /// （`LocationMode.Pointer` は実機で縦方向にずれる。`handlePointerClick` のコメント参照）。
+    public func fromScreenOffset(_ point: CGPoint) -> GeoPoint? {
+        unprojectFromScreen(point)
+    }
+
+    /// 式はコアの ``WebMercatorScreenProjection``。ここはカメラとビューの大きさを
+    /// 渡すだけにすること（android-sdk-core の同名クラスと同じ式）。
+    /// 式を各プロバイダへ写すと、片方だけ直る／片方だけずれる。
     private func projectToScreen(_ point: GeoPointProtocol) -> CGPoint? {
-        guard didReady, let map else { return nil }
-        let size = map.bounds.size
-        guard size.width > 0, size.height > 0 else { return nil }
-        guard let camera = currentProjectionCamera() else { return nil }
-
-        func worldPoint(_ lat: Double, _ lon: Double) -> (x: Double, y: Double) {
-            let clampedLat = min(max(lat, -85.05112878), 85.05112878)
-            let s = sin(clampedLat * .pi / 180.0)
-            return ((lon + 180.0) / 360.0,
-                    0.5 - log((1.0 + s) / (1.0 - s)) / (4.0 * .pi))
-        }
-
-        let worldScale = 256.0 * pow(2.0, camera.zoom)
-        let center = worldPoint(camera.center.latitude, camera.center.longitude)
-        let target = worldPoint(point.latitude, point.longitude)
-        var dx = target.x - center.x
-        if dx > 0.5 { dx -= 1.0 }
-        if dx < -0.5 { dx += 1.0 }
-        var sx = dx * worldScale
-        var sy = (target.y - center.y) * worldScale
-        if camera.bearing != 0 {
-            let angle = -camera.bearing * .pi / 180.0
-            let rx = sx * cos(angle) - sy * sin(angle)
-            let ry = sx * sin(angle) + sy * cos(angle)
-            sx = rx
-            sy = ry
-        }
-        let result = CGPoint(x: size.width / 2.0 + sx, y: size.height / 2.0 + sy)
-        return (result.x.isFinite && result.y.isFinite) ? result : nil
+        guard let camera = projectionCameraPosition(), let map else { return nil }
+        return WebMercatorScreenProjection.toScreenOffset(point, camera: camera, size: map.bounds.size)
     }
 
     /// Inverse of ``projectToScreen(_:)``: view coordinates → geographic point.
     private func unprojectFromScreen(_ point: CGPoint) -> GeoPoint? {
-        guard didReady, let map else { return nil }
-        let size = map.bounds.size
-        guard size.width > 0, size.height > 0 else { return nil }
-        guard let camera = currentProjectionCamera() else { return nil }
+        guard let camera = projectionCameraPosition(), let map else { return nil }
+        return WebMercatorScreenProjection.fromScreenOffset(point, camera: camera, size: map.bounds.size)
+    }
 
-        var sx = point.x - size.width / 2.0
-        var sy = point.y - size.height / 2.0
-        if camera.bearing != 0 {
-            let angle = camera.bearing * .pi / 180.0
-            let rx = sx * cos(angle) - sy * sin(angle)
-            let ry = sx * sin(angle) + sy * cos(angle)
-            sx = rx
-            sy = ry
-        }
-        let worldScale = 256.0 * pow(2.0, camera.zoom)
-        let clampedLat = min(max(camera.center.latitude, -85.05112878), 85.05112878)
-        let s = sin(clampedLat * .pi / 180.0)
-        let centerX = (camera.center.longitude + 180.0) / 360.0
-        let centerY = 0.5 - log((1.0 + s) / (1.0 - s)) / (4.0 * .pi)
-        var wx = centerX + sx / worldScale
-        let wy = centerY + sy / worldScale
-        wx -= floor(wx)
-        let lon = wx * 360.0 - 180.0
-        let lat = asin(tanh((0.5 - wy) * 2.0 * .pi)) * 180.0 / .pi
-        guard lat.isFinite, lon.isFinite else { return nil }
-        return GeoPoint(latitude: lat, longitude: lon, altitude: 0)
+    /// 投影に使うカメラ。地図が描ける状態になるまでは投影しない
+    /// （まだレイアウトも座標も定まっていない）。
+    private func projectionCameraPosition() -> MapCameraPosition? {
+        guard didReady, let camera = currentProjectionCamera() else { return nil }
+        return MapCameraPosition(
+            position: GeoPoint(latitude: camera.center.latitude, longitude: camera.center.longitude, altitude: 0),
+            zoom: camera.zoom,
+            bearing: camera.bearing,
+            tilt: 0
+        )
     }
 
     /// 地図を作り、制限とコンテンツまで流して返す。
@@ -372,6 +355,15 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
                     + "through the Longdo JS bridge instead"
             )
         )
+        // タイル方式のマーカーの当たり判定は「いまのカメラ」を要る
+        // （`LongdoOverlayBinding.handleMarkerTap` がズームからタイルを引くため）。
+        // カメラ**イベント**が来るまで nil のままだと、地図を一度も動かさないうちは
+        // タイル上のマーカーをタップしても黙って落ちる（実機で確認した症状）。
+        // ready の時点で地図に直接聞いて種を入れる。イベントは配らない。
+        if let camera = readNativeCamera() {
+            lastOverlayCamera = camera
+            overlayBinding?.setCurrentCamera(camera)
+        }
         strategyManager.flush()
         // Longdo のコントローラはマップ準備完了後に有効になるため、それまでに要求された
         // cameraRestriction をここで適用する。
@@ -445,13 +437,14 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         )
     }
 
-    private func emitCamera() {
-        guard let map else { return }
-        guard let loc = map.call(method: "location", args: nil) as? CLLocationCoordinate2D else { return }
+    /// 地図に直接いまのカメラを聞く。イベントを配ったり state を書き換えたりはしない。
+    private func readNativeCamera() -> MapCameraPosition? {
+        guard let map else { return nil }
+        guard let loc = map.call(method: "location", args: nil) as? CLLocationCoordinate2D else { return nil }
         let zoom = Self.doubleValue(map.call(method: "zoom", args: nil)) ?? 0
         let rotate = Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0
         let pitch = Self.doubleValue(map.call(method: "pitch", args: nil)) ?? 0
-        let updated = MapCameraPosition(
+        return MapCameraPosition(
             position: GeoPoint(latitude: loc.latitude, longitude: loc.longitude, altitude: 0),
             zoom: LongdoViewController.longdoZoomToCore(zoom),
             bearing: rotate,
@@ -462,6 +455,10 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
             // （android-for-longdo も onCameraMove の bounds から同じものを組み立てている）。
             visibleRegion: Self.visibleRegion(from: map)
         )
+    }
+
+    private func emitCamera() {
+        guard let updated = readNativeCamera() else { return }
         // 範囲・ズーム制限に違反していれば矩形内へ引き戻す。再適用で再度この経路を通り、
         // そこでは補正不要になり通常フローへ進む。android-sdk と同じく、補正した回は
         // state 更新もコールバックも行わない。
