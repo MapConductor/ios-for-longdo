@@ -28,6 +28,39 @@ final class LongdoMarkerController {
     /// Marker ids whose overlay animation is currently running (their DOM markers stay hidden).
     private var animatingIds: Set<String> = []
 
+    /// What each marker's DOM node was last built from.
+    ///
+    /// **同じ見た目なら作り直さないこと。** 作り直すと `Overlays.remove` → `Overlays.add` で
+    /// `<img>` がいったん消えて出るため、地図を動かしている間ずっとマーカーがちらつく。
+    /// SwiftUI はカメラが動くたびに `body` を評価し直す（`cameraPosition` が `@Published`）ので、
+    /// `sync` はパンの 1 フレームごとに呼ばれる。
+    /// ``LongdoMarkerTileRenderer`` が `appliedFingerprints` で同じことをしている。
+    private var applied: [String: AppliedMarker] = [:]
+
+    /// DOM へ流した内容。`hidden` は fingerprint に含まれない（アニメーション実行中かどうかは
+    /// ``animatingIds`` 側が持つ）ので、ここで一緒に覚えておく。
+    private struct AppliedMarker: Equatable {
+        let fingerprint: MarkerFingerPrint
+        let hidden: Bool
+    }
+
+    /// `DefaultMarkerIcon()` は初期化のたびにビットマップを描くので、1 つを使い回す
+    /// （コアの ``AbstractMarkerController`` も同じく 1 度だけ作っている）。
+    private static let defaultIcon = DefaultMarkerIcon()
+
+    /// 位置以外がすべて同じか。同じなら DOM ノードを作り直さず `location` で動かせる。
+    private static func differsOnlyByPosition(
+        _ previous: MarkerFingerPrint,
+        _ target: MarkerFingerPrint
+    ) -> Bool {
+        previous.id == target.id
+            && previous.icon == target.icon
+            && previous.clickable == target.clickable
+            && previous.draggable == target.draggable
+            && previous.zIndex == target.zIndex
+            && previous.animation == target.animation
+    }
+
     /// Called whenever a marker moves during a custom drag (used to keep its info bubble attached).
     var onDragVisualUpdate: ((String) -> Void)?
 
@@ -122,6 +155,7 @@ final class LongdoMarkerController {
             if let obj = objects[id] { bridge?.call("Overlays.remove", args: [obj]) }
             states.removeValue(forKey: id)
             objects.removeValue(forKey: id)
+            applied.removeValue(forKey: id)
             subscriptions.removeValue(forKey: id)?.cancel()
         }
         for marker in markers {
@@ -210,6 +244,7 @@ final class LongdoMarkerController {
         for obj in objects.values { bridge?.call("Overlays.remove", args: [obj]) }
         states.removeAll()
         objects.removeAll()
+        applied.removeAll()
         subscriptions.values.forEach { $0.cancel() }
         subscriptions.removeAll()
         animatingIds.removeAll()
@@ -217,8 +252,25 @@ final class LongdoMarkerController {
 
     private func addOrUpdate(_ marker: MarkerState) {
         guard let bridge else { return }
+        // Markers with a pending or running drop/bounce animation are rendered invisible: the
+        // screen-space overlay draws the falling icon and the DOM marker is rebuilt visible
+        // when the animation finishes.
+        let hidden = marker.getAnimation() != nil || animatingIds.contains(marker.id)
+        let target = AppliedMarker(fingerprint: marker.fingerPrint(), hidden: hidden)
+        if let previous = applied[marker.id], let existing = objects[marker.id] {
+            // 同じものを作り直さない（ちらつきの原因。ブリッジ往復も PNG のエンコードも要らない）。
+            if previous == target { return }
+            // 位置だけが変わったなら、DOM ノードは作り直さずネイティブ側で動かす。
+            if previous.hidden == target.hidden,
+               Self.differsOnlyByPosition(previous.fingerprint, target.fingerprint) {
+                applied[marker.id] = target
+                _ = bridge.objectCall(existing, method: "location", args: [marker.position.clLocation, false])
+                return
+            }
+        }
+        applied[marker.id] = target
         if let existing = objects[marker.id] { bridge.call("Overlays.remove", args: [existing]) }
-        let icon = (marker.icon ?? DefaultMarkerIcon()).toBitmapIcon()
+        let icon = (marker.icon ?? Self.defaultIcon).toBitmapIcon()
         // The SDK ignores the icon "offset" option (both for UIImage and html icons), so the
         // anchor point never reached Longdo JS. Anchor in the HTML itself instead: a zero-size
         // wrapper makes the SDK's default anchoring degenerate to the marker location, and the
@@ -233,10 +285,6 @@ final class LongdoMarkerController {
         // DOM marker would swallow touches before they reach the map. Clicks are detected by
         // our own hit test in handleTap, and dragging is implemented as a custom long-press
         // gesture in the map view (the SDK's marker dragging is never used).
-        // Markers with a pending or running drop/bounce animation are rendered invisible: the
-        // screen-space overlay draws the falling icon and the DOM marker is rebuilt visible
-        // when the animation finishes.
-        let hidden = marker.getAnimation() != nil || animatingIds.contains(marker.id)
         let html = "<div style=\"width:0;height:0;position:relative;pointer-events:none;\">"
             + "<img src=\"data:image/png;base64,\(base64)\" "
             + "style=\"position:absolute;left:\(-anchorX)px;top:\(-anchorY)px;"

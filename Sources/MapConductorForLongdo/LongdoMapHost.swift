@@ -48,6 +48,14 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     private var lastOverlayCamera: MapCameraPosition?
     private var overlayBinding: LongdoOverlayBinding?
     private let moveDispatcher = LongdoCameraMoveDispatcher()
+    /// カメラの読み取りが往復中かどうか。Longdo は同じ 1 フレームに対して `Drag` と
+    /// `Location` の両方を出すことがあるため、重なった通知は 1 回にまとめる。
+    private var cameraEmissionScheduled = false
+    /// 読み取り中に来たイベント。往復が済んだらもう一度だけ読む。
+    private var cameraEmissionPending = false
+    /// True while ``emitCamera()`` is running. See the comment there: the SDK's synchronous
+    /// bridge spins a nested run loop, so this method can re-enter itself.
+    private var isEmittingCamera = false
     private var didReady = false
     private var lastUISettings = MapUISettings()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
@@ -58,6 +66,12 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     private var lastNativeTapPoint: CGPoint?
     private var lastNativeTapUptime: TimeInterval = 0
     private var markerDragRecognizer: UILongPressGestureRecognizer?
+    /// Mirrors the WebView's one-finger pan onto the native overlay container. Longdo renders
+    /// its map on WebKit's compositor, so changing individual bubble frames from bridge events
+    /// can remain visually behind the map while a touch is down. A native transform stays in the
+    /// same gesture transaction; the exact geographic layout is restored when the gesture ends.
+    private var infoBubblePanRecognizer: UIPanGestureRecognizer?
+    private var isMirroringInfoBubblePan = false
 
     func makeMap(apiKey explicit: String?) -> LongdoMap {
         // SwiftUI は同じ Coordinator に対して `makeUIView` を複数回呼ぶことがあり
@@ -104,6 +118,17 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         drag.delegate = self
         map.addGestureRecognizer(drag)
         self.markerDragRecognizer = drag
+
+        let bubblePan = UIPanGestureRecognizer(target: self, action: #selector(handleInfoBubblePan(_:)))
+        bubblePan.maximumNumberOfTouches = 1
+        bubblePan.cancelsTouchesInView = false
+        bubblePan.delegate = self
+        // A stationary long press over a draggable marker must win. On a regular map pan the
+        // long-press recognizer fails as soon as the finger moves beyond its small tolerance;
+        // `translation(in:)` then includes that initial movement, so the bubble does not drift.
+        bubblePan.require(toFail: drag)
+        map.addGestureRecognizer(bubblePan)
+        self.infoBubblePanRecognizer = bubblePan
 
         let scope = MapOverlayScope()
         self.overlayScope = scope
@@ -244,6 +269,14 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
         // ここで外さないと破棄済みのコントローラを掴んだまま残る。
         state.serviceRegistry.removeProviderRegistrations()
+        cameraEmissionScheduled = false
+        cameraEmissionPending = false
+        isMirroringInfoBubblePan = false
+        infoBubbleContainer.transform = .identity
+        if let infoBubblePanRecognizer {
+            map?.removeGestureRecognizer(infoBubblePanRecognizer)
+        }
+        infoBubblePanRecognizer = nil
         moveDispatcher.cancel()
         markerAnimationOverlay?.unbind()
         markerAnimationOverlay = nil
@@ -400,10 +433,18 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
 
     private func bindEvents() {
         guard let map else { return }
-        let camera: () -> Void = { [weak self] in self?.emitCamera() }
+        let camera: () -> Void = { [weak self] in self?.scheduleCameraEmission() }
         for name in ["Location", "Zoom", "Rotate", "Pitch"] {
             map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: name), camera])
         }
+        // `Location` remains the canonical camera-change event. Also subscribe to Longdo's
+        // documented in-progress pan event (`Drag`) and finger-release event (`Drop`) so touch
+        // panning explicitly feeds the same camera path. `Drag` carries a delta payload while
+        // `Drop` has no payload. The dispatcher deliberately still ends on a quiet period rather
+        // than on Drop, because momentum can continue after finger-up.
+        let drag: (Any?) -> Void = { [weak self] _ in self?.scheduleCameraEmission() }
+        map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Drag"), drag])
+        map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Drop"), camera])
         // Click must be bound with a no-argument closure (argumented closures never fire
         // for this event through the SDK bridge); the tapped location is then queried via
         // LocationMode.Pointer — same approach as android-for-longdo.
@@ -417,14 +458,52 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         }
     }
 
+    /// Asks the page for the camera and emits it once the answer arrives.
+    ///
+    /// **同期の `map.call` をここで使ってはいけない。** SDK の同期ブリッジは JS の応答を
+    /// ネストしたランループで待つので、1 値につきメインスレッドが止まる。パン中は
+    /// 毎フレーム来るため、5 値を 1 つずつ聞くと 1 秒のうち 800ms が停止時間になる
+    /// （実機計測。todo/20260814.txt の 2026-08-15 追記）。
+    ///
+    /// 読み中に次のイベントが来たら「あとで 1 回」だけ覚えておく。往復の実力以上には
+    /// 要求を積まない。
+    private func scheduleCameraEmission() {
+        guard !cameraEmissionScheduled else {
+            cameraEmissionPending = true
+            return
+        }
+        cameraEmissionScheduled = true
+        readNativeCameraFromPage { [weak self] camera in
+            guard let self else { return }
+            self.cameraEmissionScheduled = false
+            if let camera { self.emitCamera(camera) }
+            if self.cameraEmissionPending {
+                self.cameraEmissionPending = false
+                self.scheduleCameraEmission()
+            }
+        }
+    }
+
     /// Longdo JS API の `map.bound()`（引数なしで現在の表示範囲を返す）から可視領域を組み立てる。
     /// 四隅は Longdo が矩形しか返さないため nil（android-for-longdo も同じく bounds だけを渡す）。
     private static func visibleRegion(from map: LongdoMap) -> MapConductorCore.VisibleRegion? {
-        guard let raw = map.call(method: "bound", args: nil) as? [String: Any],
-              let minLat = doubleValue(raw["minLat"]),
-              let maxLat = doubleValue(raw["maxLat"]),
-              let minLon = doubleValue(raw["minLon"]),
-              let maxLon = doubleValue(raw["maxLon"]) else { return nil }
+        guard let raw = map.call(method: "bound", args: nil) as? [String: Any] else { return nil }
+        return visibleRegion(
+            minLat: doubleValue(raw["minLat"]),
+            maxLat: doubleValue(raw["maxLat"]),
+            minLon: doubleValue(raw["minLon"]),
+            maxLon: doubleValue(raw["maxLon"])
+        )
+    }
+
+    /// 同期の `bound` からでも、ページ側でまとめて読んだ JSON からでも同じものを組む。
+    private static func visibleRegion(
+        minLat: Double?,
+        maxLat: Double?,
+        minLon: Double?,
+        maxLon: Double?
+    ) -> MapConductorCore.VisibleRegion? {
+        guard let minLat, let maxLat, let minLon, let maxLon else { return nil }
         return MapConductorCore.VisibleRegion(
             bounds: GeoRectBounds(
                 southWest: GeoPoint(latitude: minLat, longitude: minLon, altitude: 0),
@@ -437,28 +516,116 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         )
     }
 
-    /// 地図に直接いまのカメラを聞く。イベントを配ったり state を書き換えたりはしない。
-    private func readNativeCamera() -> MapCameraPosition? {
-        guard let map else { return nil }
-        guard let loc = map.call(method: "location", args: nil) as? CLLocationCoordinate2D else { return nil }
-        let zoom = Self.doubleValue(map.call(method: "zoom", args: nil)) ?? 0
-        let rotate = Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0
-        let pitch = Self.doubleValue(map.call(method: "pitch", args: nil)) ?? 0
-        return MapCameraPosition(
-            position: GeoPoint(latitude: loc.latitude, longitude: loc.longitude, altitude: 0),
-            zoom: LongdoViewController.longdoZoomToCore(zoom),
+    /// ページ側でカメラ 5 値をまとめて 1 つの JSON にしてから受け取る。**往復は 1 回**。
+    ///
+    /// android-for-longdo の `bindingScript()` にある `emitCamera` と同じ形
+    /// （あちらは `lon/lat/zoom/rotate/pitch/bounds` を 1 つの JSON にして push する）。
+    /// iOS も同じ構造にする。SDK の同期 `call` を 1 値ずつ回すと往復の本数がそのまま
+    /// メインスレッドの停止時間になり、パン中に追従が遅れる。
+    ///
+    /// 地図の実体はページのスクリプトスコープにある `objectList[0]`（window のグローバル
+    /// ではない）。``LongdoMarkerTileRenderer`` が `objectList[0].Renderer` へ
+    /// source/layer を注入しているのと同じ経路で、こちらは値を読むだけ。
+    private func readNativeCameraFromPage(_ completion: @escaping (MapCameraPosition?) -> Void) {
+        guard let map else {
+            completion(nil)
+            return
+        }
+        let js = """
+        (function(){
+          try {
+            var m = (typeof objectList !== 'undefined') ? objectList[0] : null;
+            if (!m) return null;
+            var c = m.location();
+            var b = null;
+            try { b = m.bound(); } catch (e) {}
+            return JSON.stringify({
+              lat: c.lat, lon: c.lon,
+              zoom: m.zoom(), rotate: m.rotate(), pitch: m.pitch(),
+              minLat: b ? b.minLat : null, maxLat: b ? b.maxLat : null,
+              minLon: b ? b.minLon : null, maxLon: b ? b.maxLon : null
+            });
+          } catch (e) { return null; }
+        })()
+        """
+        map.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            guard let json = result as? String,
+                  let data = json.data(using: .utf8),
+                  let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let lat = Self.doubleValue(raw["lat"]),
+                  let lon = Self.doubleValue(raw["lon"]) else {
+                completion(nil)
+                return
+            }
+            completion(self.makeCamera(
+                latitude: lat,
+                longitude: lon,
+                longdoZoom: Self.doubleValue(raw["zoom"]) ?? 0,
+                rotate: Self.doubleValue(raw["rotate"]) ?? 0,
+                pitch: Self.doubleValue(raw["pitch"]) ?? 0,
+                visibleRegion: Self.visibleRegion(
+                    minLat: Self.doubleValue(raw["minLat"]),
+                    maxLat: Self.doubleValue(raw["maxLat"]),
+                    minLon: Self.doubleValue(raw["minLon"]),
+                    maxLon: Self.doubleValue(raw["maxLon"])
+                )
+            ))
+        }
+    }
+
+    private func makeCamera(
+        latitude: Double,
+        longitude: Double,
+        longdoZoom: Double,
+        rotate: Double,
+        pitch: Double,
+        visibleRegion: MapConductorCore.VisibleRegion?
+    ) -> MapCameraPosition {
+        MapCameraPosition(
+            position: GeoPoint(latitude: latitude, longitude: longitude, altitude: 0),
+            zoom: LongdoViewController.longdoZoomToCore(longdoZoom),
             bearing: rotate,
             tilt: pitch,
             paddings: state.cameraPosition.paddings,
             // マーカークラスタリングは `visibleRegion.bounds` で表示範囲内のマーカーを
             // 絞り込むため、ここで付けないとクラスタが一切描画されない
             // （android-for-longdo も onCameraMove の bounds から同じものを組み立てている）。
+            visibleRegion: visibleRegion
+        )
+    }
+
+    /// 地図に直接いまのカメラを聞く（同期）。**イベント経路では使わないこと**
+    /// （``readNativeCameraFromPage(_:)`` のコメント参照）。ready 直後の種入れのように
+    /// 1 回だけ必要な場面のためにある。
+    private func readNativeCamera() -> MapCameraPosition? {
+        guard let map else { return nil }
+        guard let loc = map.call(method: "location", args: nil) as? CLLocationCoordinate2D else { return nil }
+        return makeCamera(
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            longdoZoom: Self.doubleValue(map.call(method: "zoom", args: nil)) ?? 0,
+            rotate: Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0,
+            pitch: Self.doubleValue(map.call(method: "pitch", args: nil)) ?? 0,
             visibleRegion: Self.visibleRegion(from: map)
         )
     }
 
-    private func emitCamera() {
-        guard let updated = readNativeCamera() else { return }
+    private func emitCamera(_ updated: MapCameraPosition) {
+        // この先で呼ぶカメラ制限の補正は同期 `map.call` を通る。SDK の同期ブリッジは
+        // 応答を **ネストしたランループ**（`-[NSRunLoop runMode:beforeDate:]`）で待つため、
+        // その間にメインキューへ積んだブロックが動き、ここへ再入し得る
+        // （実機のクラッシュログのバックトレースで確認）。
+        // 入れ子の回は捨て、外側が終わってから 1 回だけ出し直す。
+        guard !isEmittingCamera else {
+            scheduleCameraEmission()
+            return
+        }
+        isEmittingCamera = true
+        defer { isEmittingCamera = false }
         // 範囲・ズーム制限に違反していれば矩形内へ引き戻す。再適用で再度この経路を通り、
         // そこでは補正不要になり通常フローへ進む。android-sdk と同じく、補正した回は
         // state 更新もコールバックも行わない。
@@ -468,9 +635,26 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         overlayBinding?.setCurrentCamera(updated)
         // クラスタは visibleRegion.bounds を使って再計算する。
         Task { [weak self] in await self?.strategyManager.onCameraChanged(updated) }
-        // Bubbles must track the map on every camera event, including suppressed echoes.
-        invalidateProjectionCamera()
-        infoBubbleCoordinator?.updateAllLayouts()
+        // Bubbles must track the map on every camera event, including suppressed echoes. During
+        // a touch pan their container follows the UIKit gesture directly; updating their absolute
+        // frames at the same time would apply both the geographic movement and the translation.
+        //
+        // 投影には**いま読んだ値をそのまま使う**。`invalidateProjectionCamera()` して
+        // `currentProjectionCamera()` に聞き直すと、同じ値を得るためだけに
+        // location / zoom / rotate をブリッジ越しに 3 往復させることになる。Longdo の
+        // 同期 `call` は応答をネストしたランループで待つので、往復はそのままメイン
+        // スレッドの停止時間になる。
+        projectionCamera = (
+            CLLocationCoordinate2D(
+                latitude: updated.position.latitude,
+                longitude: updated.position.longitude
+            ),
+            updated.zoom,
+            updated.bearing
+        )
+        if !isMirroringInfoBubblePan {
+            infoBubbleCoordinator?.updateAllLayouts()
+        }
 
         // Swallow the echo events Longdo emits for moves WE applied programmatically; only
         // genuine user-driven moves are dispatched. The controller decides by comparing the
@@ -520,6 +704,29 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         }
     }
 
+    @objc private func handleInfoBubblePan(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            isMirroringInfoBubblePan = true
+            infoBubbleContainer.transform = .identity
+        case .changed:
+            guard isMirroringInfoBubblePan, let map else { return }
+            let translation = recognizer.translation(in: map)
+            infoBubbleContainer.transform = CGAffineTransform(
+                translationX: translation.x,
+                y: translation.y
+            )
+        case .ended, .cancelled, .failed:
+            guard isMirroringInfoBubblePan else { return }
+            isMirroringInfoBubblePan = false
+            infoBubbleContainer.transform = .identity
+            invalidateProjectionCamera()
+            infoBubbleCoordinator?.updateAllLayouts()
+        default:
+            break
+        }
+    }
+
     public nonisolated func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
@@ -529,9 +736,19 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
 
     public nonisolated func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         MainActor.assumeIsolated {
-            guard gestureRecognizer === markerDragRecognizer else { return true }
             let point = gestureRecognizer.location(in: gestureRecognizer.view)
-            return overlayBinding?.hasDraggableMarker(at: point) == true
+            if gestureRecognizer === markerDragRecognizer {
+                return overlayBinding?.hasDraggableMarker(at: point) == true
+            }
+            if gestureRecognizer === infoBubblePanRecognizer {
+                // A drag beginning on interactive bubble content belongs to that content. Also
+                // leave draggable markers to the long-press recognizer instead of moving both
+                // the marker and every bubble container.
+                let pointInContainer = infoBubbleContainer.convert(point, from: gestureRecognizer.view)
+                if infoBubbleContainer.hitTest(pointInContainer, with: nil) != nil { return false }
+                return overlayBinding?.hasDraggableMarker(at: point) != true
+            }
+            return true
         }
     }
 
