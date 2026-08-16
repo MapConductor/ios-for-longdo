@@ -10,7 +10,13 @@ Pod::Spec.new do |s|
   s.swift_version = "5.9"
   s.source_files = "Sources/MapConductorForLongdo/**/*.swift"
   s.dependency "MapConductorCore"
-  # Longdo Map is a WebView (Longdo Map JS API3) provider - the map is loaded inside a WKWebView
-  # from https://api.longdo.com/map3/. There is no vendor binary to vendor or depend on, so unlike
-  # the other providers this podspec declares only MapConductorCore.
+  # Longdo Map renders inside a WKWebView (Longdo Map JS API3), but the map object itself
+  # (`LongdoMap`, the gesture/bridge plumbing) comes from the vendor's own binary framework,
+  # so `import LongdoMapFramework` needs it here too - not only in Package.swift.
+  #
+  # LongdoMapFramework.xcframework is dynamic (`Mach-O 64-bit dynamically linked shared library`),
+  # and the vendor publishes the pod on CocoaPods trunk, so per ios-sdk/CLAUDE.md's
+  # "iOS Provider Distribution" section this stays a plain `s.dependency` - nothing gets embedded
+  # or redistributed by this repo. The version matches the SPM pin in Package.resolved (4.1.4).
+  s.dependency "LongdoMapFramework", "~> 4.1"
 end

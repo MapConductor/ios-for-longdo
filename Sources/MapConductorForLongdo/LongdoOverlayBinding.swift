@@ -20,6 +20,9 @@ final class LongdoOverlayBinding {
     private let rasterController: LongdoRasterLayerController
     private let markerController: LongdoMarkerController
 
+    /// カスケードの実行先。`MapViewControllerProtocol.dispatchOverlayTap` を呼ぶ。
+    private weak var mapController: LongdoViewController?
+
     private var ready = false
     private var lastMarkers: [MarkerState] = []
 
@@ -48,6 +51,16 @@ final class LongdoOverlayBinding {
         self.groundImageController = LongdoGroundImageController(bridge: bridge)
         self.rasterController = LongdoRasterLayerController(bridge: bridge)
         self.markerController = LongdoMarkerController(bridge: bridge)
+        self.mapController = controller
+        // クリックカスケードとスロット解決がここから kind で引く。
+        // **登録を忘れるとタップに反応しなくなる。**
+        // マーカーはコアのコントローラではなく DOM 要素を直接扱う独自実装なので、
+        // スロットには載せない（タップは handleMarkerTap で先に処理する）。
+        controller.registerOverlayController(circleController)
+        controller.registerOverlayController(polylineController)
+        controller.registerOverlayController(polygonController)
+        controller.registerOverlayController(groundImageController)
+        controller.registerOverlayController(rasterController)
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -189,19 +202,17 @@ final class LongdoOverlayBinding {
     }
 
     /// Route a map tap to vector-overlay hit testing (markers use their own native overlay events).
-    func handleTap(_ point: GeoPoint) {
-        if let hit = circleController.find(position: point) {
-            circleController.dispatchClick(event: CircleEvent(state: hit.state, clicked: point))
-        }
-        if let hit = polylineController.findWithClosestPoint(position: point) {
-            polylineController.dispatchClick(event: PolylineEvent(state: hit.entity.state, clicked: hit.closestPoint))
-        }
-        if let hit = polygonController.find(position: point) {
-            polygonController.dispatchClick(event: PolygonEvent(state: hit.state, clicked: point))
-        }
-        if let hit = groundImageController.find(position: point) {
-            groundImageController.dispatchClick(event: GroundImageEvent(state: hit.state, clicked: point))
-        }
+    /// オーバーレイのタップを 1 つだけ配送する。当たったら true。
+    ///
+    /// ## ★ 移行前は「先勝ち」ですらなかった
+    ///
+    /// 旧実装は circle / polyline / polygon / groundImage を **return せずに全部**
+    /// 判定していたので、重なっているオーバーレイを 1 回のタップで**複数同時に**
+    /// 配送していた。しかも呼び出し側が `onMapClick` を無条件に先に呼んでいたため、
+    /// オーバーレイに当たっても地図クリックが飛んでいた（二重配送）。
+    /// コアの `dispatchOverlayTap` に寄せて、どちらも直る。
+    func handleTap(_ point: GeoPoint) -> Bool {
+        mapController?.dispatchOverlayTap(position: point) ?? false
     }
 
     func unbind() {

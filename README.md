@@ -1,8 +1,8 @@
-# MapConductorForLongdo
+# Longdo Map SDK for MapConductor iOS
 
 Longdo Map provider for MapConductor (iOS), the counterpart of `android-for-longdo`.
 
-## Architecture
+## Description
 
 Built on the **official Longdo Map iOS SDK — Longdo Map Framework 4.x** (`LongdoMapFramework`,
 `github.com/MetamediaTechnology/longdo-map-ios-framework`, pinned `from: 4.1.0`, resolves 4.1.4).
@@ -41,6 +41,8 @@ which is how the marker tile layer is injected, mirroring android-for-longdo's `
 
 ## Setup
 
+https://mapconductor.com/setup/ios/longdo/
+
 The SDK is SwiftPackage-only (binary XCFramework + Swifter). Provide the API key (any one of):
 
 ```swift
@@ -49,7 +51,11 @@ LongdoInitSDK.apiKey = "YOUR_LONGDO_API_KEY"
 // or add LONGDO_API_KEY to Info.plist
 ```
 
+## Usage
+
 ```swift
+import SwiftUI
+import MapConductorCore
 import MapConductorForLongdo
 
 struct Demo: View {
@@ -66,20 +72,45 @@ struct Demo: View {
 }
 ```
 
-## Supported overlays
+## Components
 
-- **Marker** → native `longdo.Marker` (custom icon; click/drag via overlay events)
-- **Polyline** → native `longdo.Polyline`
-- **Polygon** → native `longdo.Polygon` (holes via nil-separated rings)
-- **Circle** → geodesic ring drawn as `longdo.Polygon` (Longdo's `Circle` radius unit is ambiguous)
-- **GroundImage** → native `longdo.Rectangle` with `texture`
-- **RasterLayer** → native `longdo.Layer` (Custom tile layer; `UrlTemplate` sources)
+### LongdoMapView [[docs]](https://mapconductor.com/mapview/)
+
+The SwiftUI map view is controlled through `LongdoViewState`.
+
+### Marker [[docs]](https://mapconductor.com/markers/)
+
+Uses native `longdo.Marker` objects with custom icons, click events, and dragging.
+
+### InfoBubble [[docs]](https://mapconductor.com/info-bubble/)
+
+Displays SwiftUI content positioned with the Longdo projection.
+
+### Circle [[docs]](https://mapconductor.com/circle/)
+
+Uses a geodesic ring drawn as a native `longdo.Polygon`.
+
+### Polyline [[docs]](https://mapconductor.com/polyline/)
+
+Uses native `longdo.Polyline` objects.
+
+### Polygon [[docs]](https://mapconductor.com/polygon/)
+
+Uses native `longdo.Polygon` objects.
+
+### Polygon Hole
+
+Polygon holes are represented by nil-separated rings.
+
+### GroundImage [[docs]](https://mapconductor.com/ground-image/)
+
+Uses native `longdo.Rectangle` objects. Raster tile layers are also supported.
 
 Colors are passed to the SDK as `UIColor` and geometry as `CLLocationCoordinate2D` directly. Vector
 overlay clicks are hit-tested by the core managers; marker click/drag come from the SDK's overlay
 events.
 
-## Marker rendering paths
+### Marker rendering paths
 
 Longdo's own markers are DOM overlays, so rendering thousands of them individually does not scale.
 Three paths are available, matching android-for-longdo:
