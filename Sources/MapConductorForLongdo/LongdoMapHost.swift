@@ -445,16 +445,58 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         let drag: (Any?) -> Void = { [weak self] _ in self?.scheduleCameraEmission() }
         map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Drag"), drag])
         map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Drop"), camera])
-        // Click must be bound with a no-argument closure (argumented closures never fire
-        // for this event through the SDK bridge); the tapped location is then queried via
-        // LocationMode.Pointer — same approach as android-for-longdo.
-        let click: () -> Void = { [weak self] in self?.handlePointerClick() }
-        map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Click"), click])
+        bindRendererClick(map)
         for name in ["OverlayClick", "OverlayDrop", "OverlayDrag"] {
             let event = name
             map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: name), { [weak self] (result: Any?) in
                 self?.overlayBinding?.handleOverlayEvent(event: event, result: result)
             }])
+        }
+    }
+
+    /// Longdo consumes its public `Click` event when one of its polygon overlays is under the
+    /// pointer. `Renderer` is the underlying MapLibre map and receives the click regardless.
+    ///
+    /// LongdoMapFramework only exposes native callbacks through `Event.bind`. Bind a private
+    /// event name to obtain one of those callbacks, then have `Renderer.on("click")` invoke the
+    /// framework's generated bridge function with the MapLibre coordinate. If Renderer is not
+    /// available (older framework), retain the public Longdo Click path as a compatibility
+    /// fallback. Exactly one path is installed, so the shared click cascade cannot run twice.
+    private func bindRendererClick(_ map: LongdoMap) {
+        let bridgeEvent = "__MapConductorRendererClick"
+        let rendererClick: (Any?) -> Void = { [weak self] result in self?.handleClick(result) }
+        map.call(method: "Event.bind", args: [bridgeEvent, rendererClick])
+
+        let script = """
+        (function(){
+          try {
+            var m = (typeof objectList !== 'undefined') ? objectList[0] : null;
+            var r = m ? m.Renderer : null;
+            var callbacks = (typeof bindFunc !== 'undefined') ? bindFunc['\(bridgeEvent)'] : null;
+            if (!m || !r || typeof r.on !== 'function' || !callbacks || callbacks.length === 0) return false;
+            if (m.__mcRendererClickBound) return true;
+            m.__mcRendererClickBound = true;
+            var notify = callbacks[callbacks.length - 1];
+            r.on('click', function(event) {
+              try {
+                var p = event && event.lngLat;
+                if ((!p || typeof p.lng !== 'number' || typeof p.lat !== 'number') &&
+                    event && event.point && typeof r.unproject === 'function') {
+                  p = r.unproject(event.point);
+                }
+                if (p && typeof p.lng === 'number' && typeof p.lat === 'number') {
+                  notify({ lon: p.lng, lat: p.lat });
+                }
+              } catch (e) {}
+            });
+            return true;
+          } catch (e) { return false; }
+        })()
+        """
+        map.evaluateJavaScript(script) { [weak self, weak map] result, _ in
+            guard (result as? Bool) != true, let self, let map else { return }
+            let click: () -> Void = { [weak self] in self?.handlePointerClick() }
+            map.call(method: "Event.bind", args: [map.ldstatic("EventName", with: "Click"), click])
         }
     }
 

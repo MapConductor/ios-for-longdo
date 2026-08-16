@@ -174,7 +174,13 @@ final class LongdoMarkerController {
     private func maybeStartAnimation(_ state: MarkerState) {
         guard let animation = state.getAnimation() else { return }
         guard !animatingIds.contains(state.id) else { return }
+        // Longdo's marker animation bypasses the core MarkerController and runs in this
+        // screen-space overlay, so it must dispatch the same callbacks itself. Android's
+        // Longdo overlay follows the same rule. RN uses onAnimateEnd to open an InfoBubble
+        // only after the dropping marker has landed.
+        state.onAnimateStart?(state)
         guard let overlay = animationOverlay else {
+            state.onAnimateEnd?(state)
             state.animate(nil)
             addOrUpdate(state)
             return
@@ -190,6 +196,7 @@ final class LongdoMarkerController {
             onFinished: { [weak self] in
                 guard let self else { return }
                 self.animatingIds.remove(state.id)
+                state.onAnimateEnd?(state)
                 state.animate(nil)
                 if self.states[state.id] != nil {
                     self.addOrUpdate(state)
