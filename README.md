@@ -43,6 +43,8 @@ which is how the marker tile layer is injected, mirroring android-for-longdo's `
 
 https://mapconductor.com/setup/ios/longdo/
 
+### API key
+
 The SDK is SwiftPackage-only (binary XCFramework + Swifter). Provide the API key (any one of):
 
 ```swift
