@@ -1,6 +1,6 @@
 import CoreLocation
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// Bridges MapConductor core to the official Longdo Map iOS SDK (`LongdoMap`). Camera operations are
 /// issued through the SDK bridge (`location` / `zoom` / `rotate` / `pitch` / `bound`); overlays live
@@ -125,7 +125,7 @@ final class LongdoViewController: MapViewControllerProtocol {
         echoUnconvergedEvents = 0
         bridge.call("location", args: [native.target.clLocation, false])
         bridge.call("zoom", args: [native.longdoZoom, false])
-        bridge.call("rotate", args: [position.bearing, false])
+        bridge.call("rotate", args: [CameraBearing.toNativeHeading(position.bearing), false])
         bridge.call("pitch", args: [native.pitch])
     }
 
@@ -138,7 +138,7 @@ final class LongdoViewController: MapViewControllerProtocol {
         let tiltAbsRad = tiltAbsDeg * .pi / 180.0
         let altitude = zoomConverter.zoomLevelToAltitude(zoomLevel: position.zoom, latitude: position.position.latitude, tilt: 0.0)
         let distanceForward = altitude * tan(tiltAbsRad)
-        let target = Spherical.computeOffset(origin: position.position, distance: distanceForward, heading: position.bearing)
+        let target = Spherical.computeOffset(origin: position.position, distance: distanceForward, heading: CameraBearing.toNativeHeading(position.bearing))
         return NativeCamera(target: target, longdoZoom: longdoZoom, pitch: tiltAbsDeg)
     }
 
