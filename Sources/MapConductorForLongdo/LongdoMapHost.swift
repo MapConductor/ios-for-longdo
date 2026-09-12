@@ -2,7 +2,7 @@ import Combine
 import CoreLocation
 import Foundation
 import LongdoMapFramework
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import SwiftUI
 import UIKit
 
@@ -184,7 +184,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         guard let map,
               let center = map.call(method: "location", args: nil) as? CLLocationCoordinate2D,
               let longdoZoom = Self.doubleValue(map.call(method: "zoom", args: nil)) else { return nil }
-        let bearing = Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0
+        let bearing = CameraBearing.bearingFromNativeHeading(Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0)
         let camera = (center, LongdoViewController.longdoZoomToCore(longdoZoom), bearing)
         projectionCamera = camera
         return camera
@@ -630,7 +630,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         MapCameraPosition(
             position: GeoPoint(latitude: latitude, longitude: longitude, altitude: 0),
             zoom: LongdoViewController.longdoZoomToCore(longdoZoom),
-            bearing: rotate,
+            bearing: CameraBearing.bearingFromNativeHeading(rotate),
             tilt: pitch,
             paddings: state.cameraPosition.paddings,
             // マーカークラスタリングは `visibleRegion.bounds` で表示範囲内のマーカーを
