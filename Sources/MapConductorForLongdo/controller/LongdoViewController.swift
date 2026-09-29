@@ -93,10 +93,24 @@ final class LongdoViewController: MapViewControllerProtocol {
         ]])
     }
 
+    /// Called after the base layer was switched; the overlay binding uses it to
+    /// put the raster layers back on top.
+    var baseLayerSwitched: (() -> Void)?
+
     /// Switches the base layer at runtime.
     func setMapDesignType(_ design: LongdoMapDesignType) {
         guard let bridge, mapReady else { return }
         bridge.call("Layers.setBase", args: [bridge.ldstatic("Layers", with: design.layerName)])
+        // The overlays only come back on the next move (measured: blank for
+        // 10 s after the switch, back after a pinch). Put them back on top
+        // once the new base is in, then make the move: one level in and out,
+        // unanimated, which lands on the same camera.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, let bridge = self.bridge else { return }
+            self.baseLayerSwitched?()
+            bridge.call("zoom", args: [true, false])
+            bridge.call("zoom", args: [false, false])
+        }
     }
 
     // MARK: - Camera application

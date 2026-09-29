@@ -13,6 +13,8 @@ final class LongdoRasterLayerHandle {
 @MainActor
 final class LongdoRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer<LongdoRasterLayerHandle> {
     private weak var bridge: LongdoBridge?
+    /// Every layer currently on the map, for ``reattachAll()``.
+    private var live: [ObjectIdentifier: LongdoRasterLayerHandle] = [:]
 
     init(bridge: LongdoBridge?) {
         self.bridge = bridge
@@ -21,7 +23,9 @@ final class LongdoRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     override func createLayer(state: RasterLayerState) async -> LongdoRasterLayerHandle? {
         RasterHeaderRuleSet.warnUnsupported(provider: "Longdo", state: state)
-        return LongdoRasterLayerHandle(object: build(state))
+        let handle = LongdoRasterLayerHandle(object: build(state))
+        live[ObjectIdentifier(handle)] = handle
+        return handle
     }
 
     override func updateLayerProperties(
@@ -38,9 +42,24 @@ final class LongdoRasterLayerOverlayRenderer: AbstractRasterLayerOverlayRenderer
 
     override func removeLayer(entity: RasterLayerEntity<LongdoRasterLayerHandle>) async {
         if let obj = entity.layer?.object { bridge?.call("Layers.remove", args: [obj]) }
+        if let layer = entity.layer { live[ObjectIdentifier(layer)] = nil }
     }
 
     func reapply(_ handles: [LongdoRasterLayerHandle]) {}
+
+    /// Puts every layer back on top after the base layer was switched.
+    ///
+    /// `Layers.setBase` leaves the layers in place but they stop showing until
+    /// the next interaction (measured: blank for 10 s, back after a pinch).
+    /// Removing and adding them again is what the next interaction does.
+    func reattachAll() {
+        guard let bridge else { return }
+        for handle in live.values {
+            guard let obj = handle.object else { continue }
+            bridge.call("Layers.remove", args: [obj])
+            bridge.call("Layers.add", args: [obj])
+        }
+    }
 
     private func build(_ state: RasterLayerState) -> LongdoMap.LDObject? {
         guard let bridge else { return nil }
@@ -72,4 +91,7 @@ final class LongdoRasterLayerController: RasterLayerController<LongdoRasterLayer
     init(bridge: LongdoBridge?) {
         super.init(rasterLayerManager: RasterLayerManager<LongdoRasterLayerHandle>(), renderer: LongdoRasterLayerOverlayRenderer(bridge: bridge))
     }
+
+    /// See ``LongdoRasterLayerOverlayRenderer/reattachAll()``.
+    func reattachAll() { renderer.reattachAll() }
 }

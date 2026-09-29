@@ -29,6 +29,8 @@ public struct LongdoDesign: LongdoMapDesignTypeProtocol, Hashable {
     // The base layers below are those provided by Longdo Map API3 (`longdo.Layers`), matching
     // android-for-longdo's LongdoDesign entries.
 
+    /// No basemap: `longdo.Layers.CLEAR`, the base layer with nothing on it.
+    public static let None = LongdoDesign(id: "None", layerName: "CLEAR")
     /// Standard map.
     public static let Normal = LongdoDesign(id: "Normal", layerName: "NORMAL")
     /// Simple, easy-to-read map.
@@ -58,7 +60,7 @@ public struct LongdoDesign: LongdoMapDesignTypeProtocol, Hashable {
 
     /// Every SDK-provided design (used by the design selector page).
     public static let all: [LongdoDesign] = [
-        Normal, Easy, Pastel, PastelGray, Hard, Gray,
+        None, Normal, Easy, Pastel, PastelGray, Hard, Gray,
         Light, Night, Dark, Political, Osm, Satellite, Hybrid,
     ]
 

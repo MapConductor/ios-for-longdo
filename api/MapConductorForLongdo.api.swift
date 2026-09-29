@@ -28,6 +28,7 @@ public struct LongdoDesign : MapConductorForLongdo.LongdoMapDesignTypeProtocol, 
   public static let Gray: MapConductorForLongdo.LongdoDesign
   public static let Light: MapConductorForLongdo.LongdoDesign
   public static let Night: MapConductorForLongdo.LongdoDesign
+  public static let None: MapConductorForLongdo.LongdoDesign
   public static let Dark: MapConductorForLongdo.LongdoDesign
   public static let Political: MapConductorForLongdo.LongdoDesign
   public static let Osm: MapConductorForLongdo.LongdoDesign
