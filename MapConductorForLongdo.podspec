@@ -18,5 +18,5 @@ Pod::Spec.new do |s|
   # and the vendor publishes the pod on CocoaPods trunk, so per ios-sdk/CLAUDE.md's
   # "iOS Provider Distribution" section this stays a plain `s.dependency` - nothing gets embedded
   # or redistributed by this repo. The version matches the SPM pin in Package.resolved (4.1.4).
-  s.dependency "LongdoMapFramework", "~> 4.1"
+  s.dependency "LongdoMapFramework", ">= 4.1.4", "< 5.0"
 end
