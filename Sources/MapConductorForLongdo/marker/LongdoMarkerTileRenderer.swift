@@ -1,7 +1,7 @@
 import CoreLocation
 import Foundation
 import LongdoMapFramework
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import UIKit
 
 /// Renders large marker sets as raster tiles instead of thousands of individual DOM markers —
@@ -91,26 +91,17 @@ final class LongdoMarkerTileRenderer {
         cacheVersion = 0
     }
 
-    /// Geo-distance tap hit-test (mirrors Android `findMarkerAt`): the nearest clickable tiled
-    /// marker within ~24px of the tap at the given native (Longdo) zoom, or nil.
-    func findMarkerAt(_ tap: GeoPointProtocol, nativeZoom: Double) -> MarkerState? {
-        guard !markers.isEmpty else { return nil }
-        let latRad = tap.latitude * .pi / 180.0
-        let metersPerPixel = Self.earthCircumferenceM * cos(latRad) / (Self.tileSize * pow(2.0, nativeZoom))
-        let thresholdMeters = Self.tapThresholdPx * metersPerPixel
-
-        var best: MarkerState?
-        var bestDistance = Double.greatestFiniteMagnitude
-        for marker in markers where marker.clickable {
-            let dLat = (marker.position.latitude - tap.latitude) * Self.metersPerDegree
-            let dLng = (marker.position.longitude - tap.longitude) * Self.metersPerDegree * cos(latRad)
-            let distance = (dLat * dLat + dLng * dLng).squareRoot()
-            if distance < thresholdMeters, distance < bestDistance {
-                bestDistance = distance
-                best = marker
-            }
-        }
-        return best
+    /// Tap hit-test (mirrors Android `findMarkerAt`). 選び方はコアの ``MarkerHitTest/pick`` と同じで、
+    /// 指の下にアイコン（ラベル込み）が描かれているマーカーを、先端の近い別のマーカーより優先する。
+    ///
+    /// - Parameter project: 地理座標をビューの座標へ投影する。
+    func findMarkerAt(_ tap: GeoPointProtocol, project: (GeoPointProtocol) -> CGPoint?) -> MarkerState? {
+        guard !markers.isEmpty,
+              let touchScreen = project(tap),
+              let bounds = MarkerHitTest.searchBounds(position: tap, touchScreen: touchScreen, project: project)
+        else { return nil }
+        let candidates = markers.filter { $0.clickable && bounds.contains(point: $0.position) }
+        return MarkerHitTest.pick(touchScreen: touchScreen, candidates: candidates, state: { $0 }, project: project)
     }
 
     private func ensureTileRenderer() -> MarkerTileRenderer<LongdoActualMarker> {
@@ -231,7 +222,4 @@ final class LongdoMarkerTileRenderer {
     }
 
     private static let tileSize = 256.0
-    private static let earthCircumferenceM = 40_075_016.686
-    private static let metersPerDegree = 111_320.0
-    private static let tapThresholdPx = 24.0
 }

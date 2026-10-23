@@ -160,13 +160,12 @@ final class LongdoOverlayBinding {
     }
 
     /// Hit-tests a map click against markers; returns true when a marker consumed the tap.
-    /// Interactive DOM markers are tested first, then (for large sets) the tiled markers via a
-    /// geo-distance hit-test at the current native zoom.
+    /// Interactive DOM markers are tested first, then (for large sets) the tiled markers, both with
+    /// the core ``MarkerHitTest/pick`` rule.
     func handleMarkerTap(_ point: GeoPoint) -> Bool {
         if markerController.handleTap(point) { return true }
-        if let tileRenderer = markerTileRenderer, let camera = lastCamera {
-            let nativeZoom = LongdoViewController.coreZoomToLongdo(camera.zoom)
-            if let hit = tileRenderer.findMarkerAt(point, nativeZoom: nativeZoom) {
+        if let tileRenderer = markerTileRenderer, let project = markerController.projector {
+            if let hit = tileRenderer.findMarkerAt(point, project: project) {
                 if hit.clickable { hit.onClick?(hit) }
                 return true
             }
