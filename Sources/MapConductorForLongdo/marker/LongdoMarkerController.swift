@@ -2,7 +2,7 @@ import Combine
 import CoreLocation
 import Foundation
 import LongdoMapFramework
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import UIKit
 
 /// Renders MapConductor markers as native `longdo.Marker` overlays on `map.Overlays`. Longdo keeps
@@ -125,28 +125,16 @@ final class LongdoMarkerController {
         _ = bridge?.objectCall(obj, method: "location", args: [position.clLocation, false])
     }
 
-    /// Finds the marker whose icon rect (with a small slop) covers the view point; when several
-    /// match, the one whose anchor is closest to the point wins.
+    /// Finds the marker at the view point. 選び方はコアの ``MarkerHitTest/pick`` と同じで、
+    /// 指の下にアイコン（ラベル込み）が描かれているマーカーを、アンカーの近い別のマーカーより優先する。
     private func markerId(at screenPoint: CGPoint, where predicate: (MarkerState) -> Bool) -> String? {
         guard let projector else { return nil }
-        var best: (id: String, distance: CGFloat)?
-        for (id, state) in states where predicate(state) {
-            guard let markerPoint = projector(state.position) else { continue }
-            // アイコン矩形 + tapTolerance。以前は許容量が 6pt 固定で、他プロバイダの
-            // `Settings.Default.tapTolerance`（14pt）より当たり判定が狭かった。
-            guard MarkerHitTest.hitsIcon(
-                touchScreen: screenPoint,
-                markerScreen: markerPoint,
-                state: state
-            ) else { continue }
-            let dx = screenPoint.x - markerPoint.x
-            let dy = screenPoint.y - markerPoint.y
-            let distance = dx * dx + dy * dy
-            if best == nil || distance < best!.distance {
-                best = (id, distance)
-            }
-        }
-        return best?.id
+        return MarkerHitTest.pick(
+            touchScreen: screenPoint,
+            candidates: states.values.filter(predicate),
+            state: { $0 },
+            project: projector
+        )?.id
     }
 
     func sync(_ markers: [MarkerState]) {
