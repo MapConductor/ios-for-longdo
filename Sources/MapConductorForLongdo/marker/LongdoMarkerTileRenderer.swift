@@ -121,7 +121,8 @@ final class LongdoMarkerTileRenderer {
             tileSize: 256 * max(1, Int(UIScreen.main.scale)),
             cacheSizeBytes: tilingOptions.cacheSize,
             debugTileOverlay: tilingOptions.debugTileOverlay,
-            iconScaleCallback: scaledCallback
+            iconScaleCallback: scaledCallback,
+            declutterPx: tilingOptions.declutterPx
         )
         TileServerRegistry.get().register(routeId: gid, provider: renderer)
         tileRenderer = renderer

@@ -61,6 +61,7 @@ final class LongdoOverlayBinding {
         controller.registerOverlayController(polygonController)
         controller.registerOverlayController(groundImageController)
         controller.registerOverlayController(rasterController)
+        controller.baseLayerSwitched = { [weak rasterController] in rasterController?.reattachAll() }
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }

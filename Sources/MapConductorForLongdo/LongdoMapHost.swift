@@ -57,6 +57,18 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     /// bridge spins a nested run loop, so this method can re-enter itself.
     private var isEmittingCamera = false
     private var didReady = false
+    private var isStyleReady = false
+    private var pendingStyle: MapViewStyle?
+    private var pendingStyleDiagnostics: (([String]) -> Void)?
+
+    /// The WebView must be ready and its raster controller registered before
+    /// a style can mount tiles. Keep updates received during initialization.
+    func updateStyle(_ style: MapViewStyle?, onDiagnostics: (([String]) -> Void)?) {
+        pendingStyle = style
+        pendingStyleDiagnostics = onDiagnostics
+        guard isStyleReady else { return }
+        applyStyle(style, onDiagnostics: onDiagnostics)
+    }
     private var lastUISettings = MapUISettings()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
     private var markerAnimationOverlay: MarkerAnimationOverlayCoordinator?
@@ -92,7 +104,10 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         option.location = state.cameraPosition.position.clLocation
         option.zoom = Int(LongdoViewController.coreZoomToLongdo(state.cameraPosition.zoom).rounded())
         option.zoomRange = 1...20
-        option.onReady = { [weak self] in self?.handleReady() }
+        option.onReady = { [weak self, weak map] in
+            guard let self, let map, self.map === map else { return }
+            self.handleReady()
+        }
         map.options = option
         map.render()
 
@@ -266,6 +281,10 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     }
 
     public func unbind() {
+        isStyleReady = false
+        didReady = false
+        pendingStyle = nil
+        pendingStyleDiagnostics = nil
         // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
         // ここで外さないと破棄済みのコントローラを掴んだまま残る。
         state.serviceRegistry.removeProviderRegistrations()
@@ -418,6 +437,8 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         updateGestures(lastUISettings)
         bindEvents()
         overlayBinding?.markReady()
+        isStyleReady = true
+        applyStyle(pendingStyle, onDiagnostics: pendingStyleDiagnostics)
         controller?.notifyMapInitialized()
         onMapLoaded?(state)
         // Bubbles synced before ready were laid out while projection was unavailable
