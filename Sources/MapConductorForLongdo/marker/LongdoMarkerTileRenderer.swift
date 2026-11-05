@@ -1,3 +1,4 @@
+import Combine
 import CoreLocation
 import Foundation
 import LongdoMapFramework
@@ -41,6 +42,13 @@ final class LongdoMarkerTileRenderer {
     private var layerId: String?
     private var appliedTemplate: String?
 
+    /// タイル担当のマーカーの購読。一覧が同じあいだの個別の変更はここで拾う。
+    private var subscriptions: [AnyCancellable] = []
+    private var refreshScheduled = false
+    /// タイル担当のマーカーがドラッグ可能・アニメーション付きになったときに呼ぶ。
+    /// タイルには描けないので、呼ばれた側が DOM の経路へ振り分け直す。
+    var onRouteChanged: (() -> Void)?
+
     init(bridge: LongdoBridge?, tilingOptions: MarkerTilingOptions) {
         self.bridge = bridge
         self.tilingOptions = tilingOptions
@@ -62,6 +70,7 @@ final class LongdoMarkerTileRenderer {
                 MarkerEntity(marker: nil, state: state, visible: true, isRendered: true, tiling: true)
             )
         }
+        subscribe(markers)
         if markerManager.allEntities().isEmpty {
             removeLayer()
             return
@@ -81,6 +90,7 @@ final class LongdoMarkerTileRenderer {
     }
 
     func clear() {
+        subscriptions.removeAll()
         removeLayer()
         if let routeId { TileServerRegistry.get().unregister(routeId: routeId) }
         routeId = nil
@@ -89,6 +99,52 @@ final class LongdoMarkerTileRenderer {
         markers = []
         appliedFingerprints = nil
         cacheVersion = 0
+    }
+
+    private func subscribe(_ markers: [MarkerState]) {
+        subscriptions = markers.map { state in
+            state.asFlow()
+                .dropFirst()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak state] _ in
+                    guard let self, let state else { return }
+                    self.markerChanged(state)
+                }
+        }
+    }
+
+    /// 一覧はそのままで、1 本のマーカーが変わった。
+    private func markerChanged(_ state: MarkerState) {
+        if state.draggable || state.getAnimation() != nil {
+            onRouteChanged?()
+            return
+        }
+        // 位置が変わっていれば索引も直す。
+        markerManager.updateEntity(
+            MarkerEntity(marker: nil, state: state, visible: true, isRendered: true, tiling: true)
+        )
+        // 一覧ごとの指紋はもう当てにならない。次に一覧が来たら描き直させる。
+        appliedFingerprints = nil
+        scheduleRefresh()
+    }
+
+    /// 描き直しは 1 回にまとめる。ラベルの付け替えのように数百本が続けて変わっても、
+    /// 層の差し替えは 1 回で済ませる。
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            guard let renderer = self.tileRenderer, let routeId = self.routeId else { return }
+            self.cacheVersion = (self.cacheVersion &+ 1) & 0x7fff_ffff
+            renderer.invalidate()
+            self.applyLayer(template: TileServerRegistry.get().urlTemplate(
+                routeId: routeId,
+                tileSize: renderer.tileSize,
+                cacheKey: String(self.cacheVersion)
+            ))
+        }
     }
 
     /// Tap hit-test (mirrors Android `findMarkerAt`). 選び方はコアの ``MarkerHitTest/pick`` と同じで、

@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// Owns and drives the Longdo overlay controllers, all using the official SDK's native overlay
 /// objects (`longdo.Polyline` / `Polygon` / `Circle` / `Marker` / `Rectangle` / `Layer`):
@@ -25,6 +25,14 @@ final class LongdoOverlayBinding {
 
     private var ready = false
     private var lastMarkers: [MarkerState] = []
+    /// 同じ一覧の再送を入口で帰す門番（他プロバイダの `syncMarkers` と同じ）。
+    ///
+    /// SwiftUI はカメラが動くたびに content を送り直してくる。以前はそのたびに全件を
+    /// 振り分けて指紋を比べていたので、14.4 万本の街路樹では 1 回 850ms ほどメイン
+    /// スレッドが止まり、パン中に何度も挟まって操作が重くなっていた。
+    /// 一覧が同じあいだのマーカー個別の変更は、``LongdoMarkerTileRenderer`` と
+    /// ``LongdoMarkerController`` がそれぞれの購読で拾う。
+    private var markerListIdentity = MarkerListIdentity()
 
     /// クラスタリングが接続されている間の描画対象。`nil` のときは通常の `content.markers`。
     ///
@@ -82,8 +90,9 @@ final class LongdoOverlayBinding {
         scope.circleCollector.sync(content.circles.map { $0.state })
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
-        lastMarkers = content.markers.map { $0.state }
         lastTiling = content.markerTilingOptions
+        guard markerListIdentity.shouldProcess(content.markers) else { return }
+        lastMarkers = content.markers.map { $0.state }
         if ready { applyMarkers() }
     }
 
@@ -134,6 +143,12 @@ final class LongdoOverlayBinding {
     private func ensureMarkerTileRenderer() -> LongdoMarkerTileRenderer {
         if let markerTileRenderer { return markerTileRenderer }
         let renderer = LongdoMarkerTileRenderer(bridge: bridge, tilingOptions: lastTiling)
+        // タイル担当のマーカーがドラッグ可能・アニメーション付きになったら、DOM の経路へ
+        // 移すために振り分け直す。
+        renderer.onRouteChanged = { [weak self] in
+            guard let self, self.ready else { return }
+            self.applyMarkers()
+        }
         markerTileRenderer = renderer
         return renderer
     }
