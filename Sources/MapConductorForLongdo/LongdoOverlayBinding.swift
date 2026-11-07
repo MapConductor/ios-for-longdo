@@ -70,6 +70,17 @@ final class LongdoOverlayBinding {
         controller.registerOverlayController(groundImageController)
         controller.registerOverlayController(rasterController)
         controller.baseLayerSwitched = { [weak rasterController] in rasterController?.reattachAll() }
+        // Many polygons are drawn into raster tiles and shown as one raster
+        // layer; taps still resolve against the original shapes.
+        let polygonTiler = PolygonTiler()
+        polygonTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: PolygonTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(PolygonTiler.layerId)
+            }
+        }
+        polygonController.tiler = polygonTiler
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -87,6 +98,7 @@ final class LongdoOverlayBinding {
     func sync(_ content: MapViewContent) {
         scope.polylineCollector.sync(content.polylines.map { $0.state })
         scope.polygonCollector.sync(content.polygons.map { $0.state })
+        polygonController.tiler?.refreshIfServerMoved()
         scope.circleCollector.sync(content.circles.map { $0.state })
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
