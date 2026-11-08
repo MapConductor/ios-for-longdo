@@ -22,6 +22,8 @@ final class LongdoOverlayBinding {
 
     /// カスケードの実行先。`MapViewControllerProtocol.dispatchOverlayTap` を呼ぶ。
     private weak var mapController: LongdoViewController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。持ち主は state。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var ready = false
     private var lastMarkers: [MarkerState] = []
@@ -50,8 +52,14 @@ final class LongdoOverlayBinding {
     /// Renders large, non-interactive marker sets as raster tiles (created on demand).
     private var markerTileRenderer: LongdoMarkerTileRenderer?
 
-    init(bridge: LongdoBridge, scope: MapOverlayScope, controller: LongdoViewController) {
+    init(
+        bridge: LongdoBridge,
+        scope: MapOverlayScope,
+        controller: LongdoViewController,
+        serviceRegistry: MapServiceRegistry
+    ) {
         self.bridge = bridge
+        self.serviceRegistry = serviceRegistry
         self.scope = scope
         self.polylineController = LongdoPolylineController(bridge: bridge)
         self.polygonController = LongdoPolygonController(bridge: bridge)
@@ -241,6 +249,8 @@ final class LongdoOverlayBinding {
         await groundImageController.clear()
         await circleController.clear()
         await rasterController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func unbind() {
