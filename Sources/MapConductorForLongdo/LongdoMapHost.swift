@@ -147,7 +147,12 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
 
         let scope = MapOverlayScope()
         self.overlayScope = scope
-        let binding = LongdoOverlayBinding(bridge: self, scope: scope, controller: controller)
+        let binding = LongdoOverlayBinding(
+            bridge: self,
+            scope: scope,
+            controller: controller,
+            serviceRegistry: state.serviceRegistry
+        )
         self.overlayBinding = binding
         binding.setMarkerProjector { [weak self] point in self?.projectToScreen(point) }
 
