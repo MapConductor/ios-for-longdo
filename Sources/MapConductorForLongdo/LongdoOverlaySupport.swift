@@ -28,8 +28,9 @@ extension GeoPointProtocol {
 /// Interpolates a path (geodesic or linear), normalizes points, splits at the antimeridian, and
 /// returns each continuous segment as `CLLocationCoordinate2D` arrays.
 ///
-/// `ring: true` treats `points` as a polygon ring: a geodesic ring also interpolates its closing
-/// edge (last -> first), which neighbour-only interpolation would leave a straight chord.
+/// `ring: true` treats `points` as a polygon ring: its closing edge (last -> first) is interpolated
+/// like the other edges (great circle, or linear lat/lng when not geodesic), which neighbour-only
+/// interpolation would leave a straight chord.
 func longdoSegments(
     _ points: [GeoPointProtocol],
     geodesic: Bool,
@@ -37,10 +38,10 @@ func longdoSegments(
     ring: Bool = false
 ) -> [[CLLocationCoordinate2D]] {
     let densified: [GeoPointProtocol]
-    if geodesic {
-        densified = ring ? densifyGeodesicRing(points) : WGS84Geodesic.createInterpolatePoints(points)
+    if ring {
+        densified = densifyPolygonRing(points, geodesic: geodesic)
     } else {
-        densified = Planar.createInterpolatePoints(points)
+        densified = geodesic ? WGS84Geodesic.createInterpolatePoints(points) : Planar.createInterpolatePoints(points)
     }
     let interpolated = densified.map { $0.normalize() }
     return splitByMeridian(interpolated, geodesic: geodesic)
@@ -51,5 +52,5 @@ func longdoSegments(
 /// Interpolates a single ring (no antimeridian split) to `CLLocationCoordinate2D` (used for polygon
 /// holes, which Longdo draws as nil-separated additional rings).
 func longdoRingCoords(_ points: [GeoPointProtocol], geodesic: Bool) -> [CLLocationCoordinate2D] {
-    (geodesic ? densifyGeodesicRing(points) : Planar.createInterpolatePoints(points)).map { $0.normalize().clLocation }
+    densifyPolygonRing(points, geodesic: geodesic).map { $0.normalize().clLocation }
 }
