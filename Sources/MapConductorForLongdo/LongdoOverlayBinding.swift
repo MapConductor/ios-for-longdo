@@ -70,6 +70,7 @@ final class LongdoOverlayBinding {
         controller.registerOverlayController(groundImageController)
         controller.registerOverlayController(rasterController)
         controller.baseLayerSwitched = { [weak rasterController] in rasterController?.reattachAll() }
+        controller.clearOverlaysHandler = { [weak self] in await self?.clearOverlays() }
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -228,6 +229,18 @@ final class LongdoOverlayBinding {
     /// コアの `dispatchOverlayTap` に寄せて、どちらも直る。
     func handleTap(_ point: GeoPoint) -> Bool {
         mapController?.dispatchOverlayTap(position: point) ?? false
+    }
+
+    /// android-sdk の `clearOverlays()` と同じく、各オーバーレイのコントローラを空にする。
+    /// `LongdoViewController.clearOverlaysHandler` から呼ばれる。
+    func clearOverlays() async {
+        markerController.clear()
+        markerTileRenderer?.clear()
+        await polylineController.clear()
+        await polygonController.clear()
+        await groundImageController.clear()
+        await circleController.clear()
+        await rasterController.clear()
     }
 
     func unbind() {
