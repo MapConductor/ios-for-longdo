@@ -58,7 +58,7 @@ final class LongdoPolygonOverlayRenderer: AbstractPolygonOverlayRenderer<LongdoP
     private func build(_ rawState: PolygonState) -> [LongdoMap.LDObject] {
         let state = resolveHoles(rawState)
         guard let bridge, state.points.count >= 3 else { return [] }
-        let outerSegments = longdoSegments(state.points, geodesic: state.geodesic, minCount: 3)
+        let outerSegments = longdoSegments(state.points, geodesic: state.geodesic, minCount: 3, ring: true)
         guard !outerSegments.isEmpty else { return [] }
         let options: [String: Any] = [
             "lineWidth": state.strokeWidth,
