@@ -22,6 +22,8 @@ final class LongdoOverlayBinding {
 
     /// カスケードの実行先。`MapViewControllerProtocol.dispatchOverlayTap` を呼ぶ。
     private weak var mapController: LongdoViewController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。持ち主は state。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var ready = false
     private var lastMarkers: [MarkerState] = []
@@ -50,8 +52,14 @@ final class LongdoOverlayBinding {
     /// Renders large, non-interactive marker sets as raster tiles (created on demand).
     private var markerTileRenderer: LongdoMarkerTileRenderer?
 
-    init(bridge: LongdoBridge, scope: MapOverlayScope, controller: LongdoViewController) {
+    init(
+        bridge: LongdoBridge,
+        scope: MapOverlayScope,
+        controller: LongdoViewController,
+        serviceRegistry: MapServiceRegistry
+    ) {
         self.bridge = bridge
+        self.serviceRegistry = serviceRegistry
         self.scope = scope
         self.polylineController = LongdoPolylineController(bridge: bridge)
         self.polygonController = LongdoPolygonController(bridge: bridge)
@@ -70,6 +78,7 @@ final class LongdoOverlayBinding {
         controller.registerOverlayController(groundImageController)
         controller.registerOverlayController(rasterController)
         controller.baseLayerSwitched = { [weak rasterController] in rasterController?.reattachAll() }
+        controller.clearOverlaysHandler = { [weak self] in await self?.clearOverlays() }
         // Many polygons are drawn into raster tiles and shown as one raster
         // layer; taps still resolve against the original shapes.
         let polygonTiler = PolygonTiler()
@@ -240,6 +249,20 @@ final class LongdoOverlayBinding {
     /// コアの `dispatchOverlayTap` に寄せて、どちらも直る。
     func handleTap(_ point: GeoPoint) -> Bool {
         mapController?.dispatchOverlayTap(position: point) ?? false
+    }
+
+    /// android-sdk の `clearOverlays()` と同じく、各オーバーレイのコントローラを空にする。
+    /// `LongdoViewController.clearOverlaysHandler` から呼ばれる。
+    func clearOverlays() async {
+        markerController.clear()
+        markerTileRenderer?.clear()
+        await polylineController.clear()
+        await polygonController.clear()
+        await groundImageController.clear()
+        await circleController.clear()
+        await rasterController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func unbind() {
