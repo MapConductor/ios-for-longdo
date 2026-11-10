@@ -90,6 +90,17 @@ final class LongdoOverlayBinding {
             }
         }
         polygonController.tiler = polygonTiler
+        // Many polylines likewise, in their own raster layer in the polyline band
+        // (under the natively drawn polylines); taps still resolve against the original lines.
+        let polylineTiler = PolylineTiler()
+        polylineTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: PolylineTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(PolylineTiler.layerId)
+            }
+        }
+        polylineController.tiler = polylineTiler
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -108,6 +119,8 @@ final class LongdoOverlayBinding {
         scope.polylineCollector.sync(content.polylines.map { $0.state })
         scope.polygonCollector.sync(content.polygons.map { $0.state })
         polygonController.tiler?.refreshIfServerMoved()
+        if polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { scope.polylineCollector.flush() }
+        polylineController.tiler?.refreshIfServerMoved()
         scope.circleCollector.sync(content.circles.map { $0.state })
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
