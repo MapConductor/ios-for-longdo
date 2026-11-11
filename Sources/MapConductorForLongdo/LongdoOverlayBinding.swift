@@ -101,6 +101,15 @@ final class LongdoOverlayBinding {
             }
         }
         polylineController.tiler = polylineTiler
+        let circleTiler = CircleTiler()
+        circleTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: CircleTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(CircleTiler.layerId)
+            }
+        }
+        circleController.tiler = circleTiler
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -120,7 +129,9 @@ final class LongdoOverlayBinding {
         scope.polygonCollector.sync(content.polygons.map { $0.state })
         polygonController.tiler?.refreshIfServerMoved()
         if polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { scope.polylineCollector.flush() }
+        if circleController.tiler?.setOptions(content.circleTilingOptions) == true { scope.circleCollector.flush() }
         polylineController.tiler?.refreshIfServerMoved()
+        circleController.tiler?.refreshIfServerMoved()
         scope.circleCollector.sync(content.circles.map { $0.state })
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
@@ -190,6 +201,7 @@ final class LongdoOverlayBinding {
     func setCurrentCamera(_ camera: MapCameraPosition) {
         lastCamera = camera
         polylineController.setCurrentCameraPosition(camera)
+        circleController.setCurrentCameraPosition(camera)
     }
 
     /// Current state for a marker id (used by the info-bubble coordinator to resolve icons).
