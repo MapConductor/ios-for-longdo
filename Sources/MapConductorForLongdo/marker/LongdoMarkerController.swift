@@ -42,13 +42,16 @@ final class LongdoMarkerController {
     private struct AppliedMarker: Equatable {
         let fingerprint: MarkerFingerPrint
         let hidden: Bool
-        /// DOM に書いた CSS の z-index（``drawOrder(_:)``）。位置だけの移動でも、これが変われば作り直す。
+        /// DOM に書いた CSS の z-index（``drawOrder(_:)``）。これだけが変わったときは作り直さず、
+        /// 入れ物の z-index を書き換える（``restackScript(_:)``）。
         let drawOrder: Int
     }
 
-    /// 同じ zIndex の中を何段に分けるか（``drawOrder(_:)``）。細かくすると、動いているマーカーが
-    /// 段をまたぐたびに DOM を作り直してちらつく。緯度で約 0.044 度（数 km）ごと。
-    private static let drawOrderTieSteps = 1 << 12
+    /// 同じ zIndex の中を何段に分けるか（``drawOrder(_:)``）。Google と同じ 2^19 段（数十 m ごと）。
+    /// ±(zIndexSpan + 1) × 2^19 を 0 以上へずらすと 0...2^31 − 1 で、CSS の z-index（32 ビット）に収まる。
+    /// 以前は 2^12 段（緯度で約 0.044 度）で、近くに重なったマーカーは足した順になっていた。
+    /// 段をまたいでも DOM は作り直さない（z-index だけ書き換える）ので、細かくしてもちらつかない。
+    private static let drawOrderTieSteps = 1 << 19
 
     /// マーカー帯の中の重なり順（``MarkerDrawOrder``）を CSS の z-index にしたもの。大きいほど手前。
     /// 帯の外（ほかのオーバーレイ）とは Longdo のレイヤが分かれているので比べない。
@@ -357,12 +360,18 @@ final class LongdoMarkerController {
         if let previous = applied[marker.id], let existing = objects[marker.id] {
             // 同じものを作り直さない（ちらつきの原因。ブリッジ往復も PNG のエンコードも要らない）。
             if previous == target { return }
-            // 位置だけが変わったなら、DOM ノードは作り直さずネイティブ側で動かす。
+            // 位置（と、それで変わる重なり順）だけが変わったなら、DOM ノードは作り直さず
+            // ネイティブ側で動かし、z-index だけ書き換える。
             if previous.hidden == target.hidden,
-               previous.drawOrder == target.drawOrder,
-               Self.differsOnlyByPosition(previous.fingerprint, target.fingerprint) {
+               previous.fingerprint == target.fingerprint
+                || Self.differsOnlyByPosition(previous.fingerprint, target.fingerprint) {
                 applied[marker.id] = target
-                _ = bridge.objectCall(existing, method: "location", args: [marker.position.clLocation, false])
+                if previous.fingerprint != target.fingerprint {
+                    _ = bridge.objectCall(existing, method: "location", args: [marker.position.clLocation, false])
+                }
+                if previous.drawOrder != target.drawOrder {
+                    bridge.runJavaScript(Self.restackScript(["\(domKey(marker.id)):\(drawOrder)"]))
+                }
                 return
             }
         }
