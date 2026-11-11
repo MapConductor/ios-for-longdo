@@ -200,6 +200,9 @@ final class LongdoOverlayBinding {
 
     func setCurrentCamera(_ camera: MapCameraPosition) {
         lastCamera = camera
+        // 回したら DOM マーカーの重なり順を付け直す（同じ zIndex なら画面で下ほど手前）。
+        // タイルに焼いたマーカーは北が上のまま。
+        markerController.applyDrawOrderFrame(MarkerDrawOrder.Frame(camera: camera))
         polylineController.setCurrentCameraPosition(camera)
         circleController.setCurrentCameraPosition(camera)
     }

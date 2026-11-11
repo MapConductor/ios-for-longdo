@@ -53,9 +53,64 @@ final class LongdoMarkerController {
     /// マーカー帯の中の重なり順（``MarkerDrawOrder``）を CSS の z-index にしたもの。大きいほど手前。
     /// 帯の外（ほかのオーバーレイ）とは Longdo のレイヤが分かれているので比べない。
     /// 負の z-index は地図の下へ沈みうるので、0 以上へずらす。
-    private static func drawOrder(_ marker: MarkerState) -> Int {
-        MarkerDrawOrder.integerKey(zIndex: marker.zIndex, position: marker.position, tieSteps: drawOrderTieSteps)
-            + (MarkerDrawOrder.zIndexSpan + 1) * drawOrderTieSteps
+    private func drawOrder(_ marker: MarkerState) -> Int {
+        MarkerDrawOrder.integerKey(
+            zIndex: marker.zIndex,
+            position: marker.position,
+            tieSteps: Self.drawOrderTieSteps,
+            frame: drawOrderFrame
+        ) + (MarkerDrawOrder.zIndexSpan + 1) * Self.drawOrderTieSteps
+    }
+
+    /// 重なり順を出すときの地図の向き（``MarkerDrawOrder``）。
+    private var drawOrderFrame: MarkerDrawOrder.Frame = .northUp
+
+    /// DOM の入れ物に付ける番号（`data-mc-k`）。マーカー id は HTML にそのまま書けないので番号で引く。
+    private var domKeys: [String: Int] = [:]
+    private var nextDomKey = 0
+
+    private func domKey(_ id: String) -> Int {
+        if let key = domKeys[id] { return key }
+        nextDomKey += 1
+        domKeys[id] = nextDomKey
+        return nextDomKey
+    }
+
+    /// 地図を回したら、同じ zIndex の中の順位（回したあとの画面で下ほど手前）を付け直す。
+    ///
+    /// DOM マーカーは作り直さず、入れ物の z-index だけを書き換える（作り直すとちらつく）。
+    /// 0.5 度未満の回転では何もしない。
+    func applyDrawOrderFrame(_ frame: MarkerDrawOrder.Frame) {
+        guard frame.needsReorder(from: drawOrderFrame) else { return }
+        drawOrderFrame = frame
+        var updates: [String] = []
+        for (id, marker) in states {
+            guard let previous = applied[id] else { continue }
+            let order = drawOrder(marker)
+            if previous.drawOrder == order { continue }
+            applied[id] = AppliedMarker(fingerprint: previous.fingerprint, hidden: previous.hidden, drawOrder: order)
+            updates.append("\(domKey(id)):\(order)")
+        }
+        guard !updates.isEmpty, let bridge else { return }
+        bridge.runJavaScript(Self.restackScript(updates))
+    }
+
+    private static func restackScript(_ updates: [String]) -> String {
+        """
+        (function () {
+          var z = {\(updates.joined(separator: ","))};
+          var wrappers = document.querySelectorAll('div[data-mc-k]');
+          for (var i = 0; i < wrappers.length; i++) {
+            var w = wrappers[i];
+            var v = z[w.getAttribute('data-mc-k')];
+            if (v === undefined) { continue; }
+            w.setAttribute('data-mc-z', v);
+            var p = w.parentElement;
+            while (p && p !== document.body && getComputedStyle(p).position !== 'absolute') { p = p.parentElement; }
+            if (p && p !== document.body) { p.style.zIndex = v; }
+          }
+        })();
+        """
     }
 
     /// `DefaultMarkerIcon()` は初期化のたびにビットマップを描くので、1 つを使い回す
@@ -158,6 +213,7 @@ final class LongdoMarkerController {
             states.removeValue(forKey: id)
             objects.removeValue(forKey: id)
             applied.removeValue(forKey: id)
+            domKeys.removeValue(forKey: id)
             subscriptions.removeValue(forKey: id)?.cancel()
         }
         for marker in markers {
@@ -284,6 +340,7 @@ final class LongdoMarkerController {
         states.removeAll()
         objects.removeAll()
         applied.removeAll()
+        domKeys.removeAll()
         subscriptions.values.forEach { $0.cancel() }
         subscriptions.removeAll()
         animatingIds.removeAll()
@@ -295,7 +352,7 @@ final class LongdoMarkerController {
         // screen-space overlay draws the falling icon and the DOM marker is rebuilt visible
         // when the animation finishes.
         let hidden = marker.getAnimation() != nil || animatingIds.contains(marker.id)
-        let drawOrder = Self.drawOrder(marker)
+        let drawOrder = self.drawOrder(marker)
         let target = AppliedMarker(fingerprint: marker.fingerPrint(), hidden: hidden, drawOrder: drawOrder)
         if let previous = applied[marker.id], let existing = objects[marker.id] {
             // 同じものを作り直さない（ちらつきの原因。ブリッジ往復も PNG のエンコードも要らない）。
@@ -326,7 +383,7 @@ final class LongdoMarkerController {
         // DOM marker would swallow touches before they reach the map. Clicks are detected by
         // our own hit test in handleTap, and dragging is implemented as a custom long-press
         // gesture in the map view (the SDK's marker dragging is never used).
-        let html = "<div data-mc-z=\"\(drawOrder)\" style=\"width:0;height:0;position:relative;pointer-events:none;\">"
+        let html = "<div data-mc-k=\"\(domKey(marker.id))\" data-mc-z=\"\(drawOrder)\" style=\"width:0;height:0;position:relative;pointer-events:none;\">"
             + "<img src=\"data:image/png;base64,\(base64)\" "
             + "style=\"position:absolute;left:\(-anchorX)px;top:\(-anchorY)px;"
             + "width:\(width)px;height:\(height)px;max-width:none;display:block;"
