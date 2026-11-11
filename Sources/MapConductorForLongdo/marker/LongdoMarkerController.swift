@@ -42,6 +42,20 @@ final class LongdoMarkerController {
     private struct AppliedMarker: Equatable {
         let fingerprint: MarkerFingerPrint
         let hidden: Bool
+        /// DOM に書いた CSS の z-index（``drawOrder(_:)``）。位置だけの移動でも、これが変われば作り直す。
+        let drawOrder: Int
+    }
+
+    /// 同じ zIndex の中を何段に分けるか（``drawOrder(_:)``）。細かくすると、動いているマーカーが
+    /// 段をまたぐたびに DOM を作り直してちらつく。緯度で約 0.044 度（数 km）ごと。
+    private static let drawOrderTieSteps = 1 << 12
+
+    /// マーカー帯の中の重なり順（``MarkerDrawOrder``）を CSS の z-index にしたもの。大きいほど手前。
+    /// 帯の外（ほかのオーバーレイ）とは Longdo のレイヤが分かれているので比べない。
+    /// 負の z-index は地図の下へ沈みうるので、0 以上へずらす。
+    private static func drawOrder(_ marker: MarkerState) -> Int {
+        MarkerDrawOrder.integerKey(zIndex: marker.zIndex, position: marker.position, tieSteps: drawOrderTieSteps)
+            + (MarkerDrawOrder.zIndexSpan + 1) * drawOrderTieSteps
     }
 
     /// `DefaultMarkerIcon()` は初期化のたびにビットマップを描くので、1 つを使い回す
@@ -153,7 +167,35 @@ final class LongdoMarkerController {
             if isNew { subscribe(marker) }
             maybeStartAnimation(marker)
         }
+        applyStackOrderIfNeeded()
     }
+
+    /// 作り直した DOM マーカーがあるか。``applyStackOrderIfNeeded()`` が見る。
+    private var needsStackOrder = false
+
+    /// 重なり順を DOM に書く。
+    ///
+    /// SDK はマーカーごとに絶対配置の入れ物を作って `html` をその中へ入れるので、`html` 側の
+    /// z-index は入れ物の外へ効かない（実機で、足した順のまま描かれた）。`data-mc-z` に
+    /// 書いておいた値を、いちばん近い絶対配置の祖先（SDK の入れ物）の z-index へ写す。
+    /// 作り直したマーカーがあったときだけ走らせる（パンのたびに走らせない）。
+    private func applyStackOrderIfNeeded() {
+        guard needsStackOrder, let bridge else { return }
+        needsStackOrder = false
+        bridge.runJavaScript(Self.stackOrderScript)
+    }
+
+    private static let stackOrderScript = """
+        (function () {
+          var wrappers = document.querySelectorAll('div[data-mc-z]');
+          for (var i = 0; i < wrappers.length; i++) {
+            var w = wrappers[i];
+            var p = w.parentElement;
+            while (p && p !== document.body && getComputedStyle(p).position !== 'absolute') { p = p.parentElement; }
+            if (p && p !== document.body) { p.style.zIndex = w.getAttribute('data-mc-z'); }
+          }
+        })();
+        """
 
     /// Starts the screen-space drop/bounce animation for a marker whose state requests one.
     /// The native DOM marker is rendered hidden while the overlay animates the icon; when the
@@ -171,6 +213,7 @@ final class LongdoMarkerController {
             state.onAnimateEnd?(state)
             state.animate(nil)
             addOrUpdate(state)
+            applyStackOrderIfNeeded()
             return
         }
         animatingIds.insert(state.id)
@@ -188,6 +231,7 @@ final class LongdoMarkerController {
                 state.animate(nil)
                 if self.states[state.id] != nil {
                     self.addOrUpdate(state)
+                    self.applyStackOrderIfNeeded()
                 }
             }
         ))
@@ -251,12 +295,14 @@ final class LongdoMarkerController {
         // screen-space overlay draws the falling icon and the DOM marker is rebuilt visible
         // when the animation finishes.
         let hidden = marker.getAnimation() != nil || animatingIds.contains(marker.id)
-        let target = AppliedMarker(fingerprint: marker.fingerPrint(), hidden: hidden)
+        let drawOrder = Self.drawOrder(marker)
+        let target = AppliedMarker(fingerprint: marker.fingerPrint(), hidden: hidden, drawOrder: drawOrder)
         if let previous = applied[marker.id], let existing = objects[marker.id] {
             // 同じものを作り直さない（ちらつきの原因。ブリッジ往復も PNG のエンコードも要らない）。
             if previous == target { return }
             // 位置だけが変わったなら、DOM ノードは作り直さずネイティブ側で動かす。
             if previous.hidden == target.hidden,
+               previous.drawOrder == target.drawOrder,
                Self.differsOnlyByPosition(previous.fingerprint, target.fingerprint) {
                 applied[marker.id] = target
                 _ = bridge.objectCall(existing, method: "location", args: [marker.position.clLocation, false])
@@ -280,7 +326,7 @@ final class LongdoMarkerController {
         // DOM marker would swallow touches before they reach the map. Clicks are detected by
         // our own hit test in handleTap, and dragging is implemented as a custom long-press
         // gesture in the map view (the SDK's marker dragging is never used).
-        let html = "<div style=\"width:0;height:0;position:relative;pointer-events:none;\">"
+        let html = "<div data-mc-z=\"\(drawOrder)\" style=\"width:0;height:0;position:relative;pointer-events:none;\">"
             + "<img src=\"data:image/png;base64,\(base64)\" "
             + "style=\"position:absolute;left:\(-anchorX)px;top:\(-anchorY)px;"
             + "width:\(width)px;height:\(height)px;max-width:none;display:block;"
@@ -294,6 +340,7 @@ final class LongdoMarkerController {
         let obj = bridge.ldobject("Marker", with: [marker.position.clLocation, options])
         bridge.call("Overlays.add", args: [obj])
         objects[marker.id] = obj
+        needsStackOrder = true
     }
 
     private func subscribe(_ marker: MarkerState) {
@@ -305,6 +352,7 @@ final class LongdoMarkerController {
                 // here for every position change would flicker and fight the drag.
                 if self.draggingMarkerId == marker.id { return }
                 self.addOrUpdate(marker)
+                self.applyStackOrderIfNeeded()
                 self.maybeStartAnimation(marker)
             }
     }
