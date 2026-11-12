@@ -698,11 +698,14 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         // そこでは補正不要になり通常フローへ進む。android-sdk と同じく、補正した回は
         // state 更新もコールバックも行わない。
         if controller?.applyCameraRestrictionCorrectionIfNeeded(updated) == true { return }
-        state.updateCameraPosition(updated)
-        lastOverlayCamera = updated
-        overlayBinding?.setCurrentCamera(updated)
+        // 外へ出すのはターゲット（パディングを除いた領域の中央）。画面の投影とエコー判定は
+        // 地図が報告した中心（updated）のまま使う。
+        let reported = controller?.reportedCamera(updated) ?? updated
+        state.updateCameraPosition(reported)
+        lastOverlayCamera = reported
+        overlayBinding?.setCurrentCamera(reported)
         // クラスタは visibleRegion.bounds を使って再計算する。
-        Task { [weak self] in await self?.strategyManager.onCameraChanged(updated) }
+        Task { [weak self] in await self?.strategyManager.onCameraChanged(reported) }
         // Bubbles must track the map on every camera event, including suppressed echoes. During
         // a touch pan their container follows the UIKit gesture directly; updating their absolute
         // frames at the same time would apply both the geographic movement and the translation.
@@ -730,7 +733,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         if controller?.shouldSuppressCameraEcho(updated) == true { return }
 
         moveDispatcher.dispatch(
-            position: updated,
+            position: reported,
             onStart: { [weak self] pos in self?.controller?.notifyCameraMoveStart(pos); self?.onCameraMoveStart?(pos) },
             onMove: { [weak self] pos in self?.controller?.notifyCameraMove(pos); self?.onCameraMove?(pos) },
             onEnd: { [weak self] pos in self?.controller?.notifyCameraMoveEnd(pos); self?.onCameraMoveEnd?(pos) }
