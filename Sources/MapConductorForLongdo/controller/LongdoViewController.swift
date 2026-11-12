@@ -37,6 +37,12 @@ final class LongdoViewController: MapViewControllerProtocol {
     private var mapInitializedListener: OnMapInitializedHandler?
 
     private var mapReady = false
+    /// 直近の移動で要求されたパディング。Longdo のブリッジにはパディングが無いので、中心をずらして
+    /// 再現し（``CameraPaddingEmulation``）、読み戻しで逆にずらすときに使う。
+    private var lastPaddings: MapPaddingsProtocol?
+
+    /// Longdo の地図は MapLibre GL で描いている（`map.Renderer`）ので、縦の視野角は MapLibre と同じ。
+    static let verticalFieldOfView: Double = 36.87
     private var pendingCameraPosition: MapCameraPosition?
 
     /// Echo-filter state: the camera we expect Longdo to report after the most recent
@@ -84,6 +90,16 @@ final class LongdoViewController: MapViewControllerProtocol {
         if mapReady { applyCamera(position) } else { pendingCameraPosition = position }
     }
 
+    /// Longdo から読み戻したカメラ（画面中心）を、ターゲット・パディング・視野角を持つカメラへ戻す。
+    func reportedCamera(_ camera: MapCameraPosition) -> MapCameraPosition {
+        CameraPaddingEmulation.restored(
+            camera,
+            paddings: lastPaddings,
+            fov: Self.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.bounds.size
+        )
+    }
+
     func animateCamera(position: MapCameraPosition, duration: Long) {
         // Longdo's bridge animates center and zoom with separate commands; issuing both animated
         // makes the later zoom cut off the pan. Camera sync follows the source's continuous events,
@@ -127,8 +143,15 @@ final class LongdoViewController: MapViewControllerProtocol {
         let pitch: Double
     }
 
-    private func applyCamera(_ position: MapCameraPosition) {
+    private func applyCamera(_ requested: MapCameraPosition) {
         guard let bridge else { return }
+        // パディングの分だけ中心をずらしてから渡す。以下（エコー判定を含む）は中心の空間で扱う。
+        lastPaddings = requested.paddings
+        let position = CameraPaddingEmulation.applied(
+            to: requested,
+            fov: Self.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.bounds.size
+        )
         let native = nativeCameraFor(position)
         // What we expect Longdo to report back for this apply, in core-camera terms
         // (nativeCameraFor may offset the target and flip the pitch sign for negative tilt;
