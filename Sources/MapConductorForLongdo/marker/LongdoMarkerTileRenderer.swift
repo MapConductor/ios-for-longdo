@@ -1,7 +1,8 @@
+import Combine
 import CoreLocation
 import Foundation
 import LongdoMapFramework
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import UIKit
 
 /// Renders large marker sets as raster tiles instead of thousands of individual DOM markers —
@@ -41,6 +42,13 @@ final class LongdoMarkerTileRenderer {
     private var layerId: String?
     private var appliedTemplate: String?
 
+    /// タイル担当のマーカーの購読。一覧が同じあいだの個別の変更はここで拾う。
+    private var subscriptions: [AnyCancellable] = []
+    private var refreshScheduled = false
+    /// タイル担当のマーカーがドラッグ可能・アニメーション付きになったときに呼ぶ。
+    /// タイルには描けないので、呼ばれた側が DOM の経路へ振り分け直す。
+    var onRouteChanged: (() -> Void)?
+
     init(bridge: LongdoBridge?, tilingOptions: MarkerTilingOptions) {
         self.bridge = bridge
         self.tilingOptions = tilingOptions
@@ -62,6 +70,7 @@ final class LongdoMarkerTileRenderer {
                 MarkerEntity(marker: nil, state: state, visible: true, isRendered: true, tiling: true)
             )
         }
+        subscribe(markers)
         if markerManager.allEntities().isEmpty {
             removeLayer()
             return
@@ -81,6 +90,7 @@ final class LongdoMarkerTileRenderer {
     }
 
     func clear() {
+        subscriptions.removeAll()
         removeLayer()
         if let routeId { TileServerRegistry.get().unregister(routeId: routeId) }
         routeId = nil
@@ -91,26 +101,63 @@ final class LongdoMarkerTileRenderer {
         cacheVersion = 0
     }
 
-    /// Geo-distance tap hit-test (mirrors Android `findMarkerAt`): the nearest clickable tiled
-    /// marker within ~24px of the tap at the given native (Longdo) zoom, or nil.
-    func findMarkerAt(_ tap: GeoPointProtocol, nativeZoom: Double) -> MarkerState? {
-        guard !markers.isEmpty else { return nil }
-        let latRad = tap.latitude * .pi / 180.0
-        let metersPerPixel = Self.earthCircumferenceM * cos(latRad) / (Self.tileSize * pow(2.0, nativeZoom))
-        let thresholdMeters = Self.tapThresholdPx * metersPerPixel
-
-        var best: MarkerState?
-        var bestDistance = Double.greatestFiniteMagnitude
-        for marker in markers where marker.clickable {
-            let dLat = (marker.position.latitude - tap.latitude) * Self.metersPerDegree
-            let dLng = (marker.position.longitude - tap.longitude) * Self.metersPerDegree * cos(latRad)
-            let distance = (dLat * dLat + dLng * dLng).squareRoot()
-            if distance < thresholdMeters, distance < bestDistance {
-                bestDistance = distance
-                best = marker
-            }
+    private func subscribe(_ markers: [MarkerState]) {
+        subscriptions = markers.map { state in
+            state.asFlow()
+                .dropFirst()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self, weak state] _ in
+                    guard let self, let state else { return }
+                    self.markerChanged(state)
+                }
         }
-        return best
+    }
+
+    /// 一覧はそのままで、1 本のマーカーが変わった。
+    private func markerChanged(_ state: MarkerState) {
+        if state.draggable || state.getAnimation() != nil {
+            onRouteChanged?()
+            return
+        }
+        // 位置が変わっていれば索引も直す。
+        markerManager.updateEntity(
+            MarkerEntity(marker: nil, state: state, visible: true, isRendered: true, tiling: true)
+        )
+        // 一覧ごとの指紋はもう当てにならない。次に一覧が来たら描き直させる。
+        appliedFingerprints = nil
+        scheduleRefresh()
+    }
+
+    /// 描き直しは 1 回にまとめる。ラベルの付け替えのように数百本が続けて変わっても、
+    /// 層の差し替えは 1 回で済ませる。
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            guard let renderer = self.tileRenderer, let routeId = self.routeId else { return }
+            self.cacheVersion = (self.cacheVersion &+ 1) & 0x7fff_ffff
+            renderer.invalidate()
+            self.applyLayer(template: TileServerRegistry.get().urlTemplate(
+                routeId: routeId,
+                tileSize: renderer.tileSize,
+                cacheKey: String(self.cacheVersion)
+            ))
+        }
+    }
+
+    /// Tap hit-test (mirrors Android `findMarkerAt`). 選び方はコアの ``MarkerHitTest/pick`` と同じで、
+    /// 指の下にアイコン（ラベル込み）が描かれているマーカーを、先端の近い別のマーカーより優先する。
+    ///
+    /// - Parameter project: 地理座標をビューの座標へ投影する。
+    func findMarkerAt(_ tap: GeoPointProtocol, project: (GeoPointProtocol) -> CGPoint?) -> MarkerState? {
+        guard !markers.isEmpty,
+              let touchScreen = project(tap),
+              let bounds = MarkerHitTest.searchBounds(position: tap, touchScreen: touchScreen, project: project)
+        else { return nil }
+        let candidates = markers.filter { $0.clickable && bounds.contains(point: $0.position) }
+        return MarkerHitTest.pick(touchScreen: touchScreen, candidates: candidates, state: { $0 }, project: project)
     }
 
     private func ensureTileRenderer() -> MarkerTileRenderer<LongdoActualMarker> {
@@ -130,7 +177,8 @@ final class LongdoMarkerTileRenderer {
             tileSize: 256 * max(1, Int(UIScreen.main.scale)),
             cacheSizeBytes: tilingOptions.cacheSize,
             debugTileOverlay: tilingOptions.debugTileOverlay,
-            iconScaleCallback: scaledCallback
+            iconScaleCallback: scaledCallback,
+            declutterPx: tilingOptions.declutterPx
         )
         TileServerRegistry.get().register(routeId: gid, provider: renderer)
         tileRenderer = renderer
@@ -230,7 +278,4 @@ final class LongdoMarkerTileRenderer {
     }
 
     private static let tileSize = 256.0
-    private static let earthCircumferenceM = 40_075_016.686
-    private static let metersPerDegree = 111_320.0
-    private static let tapThresholdPx = 24.0
 }

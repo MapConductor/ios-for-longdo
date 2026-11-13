@@ -2,7 +2,7 @@ import Combine
 import CoreLocation
 import Foundation
 import LongdoMapFramework
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 import SwiftUI
 import UIKit
 
@@ -57,6 +57,18 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     /// bridge spins a nested run loop, so this method can re-enter itself.
     private var isEmittingCamera = false
     private var didReady = false
+    private var isStyleReady = false
+    private var pendingStyle: MapViewStyle?
+    private var pendingStyleDiagnostics: (([String]) -> Void)?
+
+    /// The WebView must be ready and its raster controller registered before
+    /// a style can mount tiles. Keep updates received during initialization.
+    func updateStyle(_ style: MapViewStyle?, onDiagnostics: (([String]) -> Void)?) {
+        pendingStyle = style
+        pendingStyleDiagnostics = onDiagnostics
+        guard isStyleReady else { return }
+        applyStyle(style, onDiagnostics: onDiagnostics)
+    }
     private var lastUISettings = MapUISettings()
     private var infoBubbleCoordinator: InfoBubbleOverlayCoordinator?
     private var markerAnimationOverlay: MarkerAnimationOverlayCoordinator?
@@ -92,7 +104,10 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         option.location = state.cameraPosition.position.clLocation
         option.zoom = Int(LongdoViewController.coreZoomToLongdo(state.cameraPosition.zoom).rounded())
         option.zoomRange = 1...20
-        option.onReady = { [weak self] in self?.handleReady() }
+        option.onReady = { [weak self, weak map] in
+            guard let self, let map, self.map === map else { return }
+            self.handleReady()
+        }
         map.options = option
         map.render()
 
@@ -132,7 +147,12 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
 
         let scope = MapOverlayScope()
         self.overlayScope = scope
-        let binding = LongdoOverlayBinding(bridge: self, scope: scope, controller: controller)
+        let binding = LongdoOverlayBinding(
+            bridge: self,
+            scope: scope,
+            controller: controller,
+            serviceRegistry: state.serviceRegistry
+        )
         self.overlayBinding = binding
         binding.setMarkerProjector { [weak self] point in self?.projectToScreen(point) }
 
@@ -184,7 +204,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         guard let map,
               let center = map.call(method: "location", args: nil) as? CLLocationCoordinate2D,
               let longdoZoom = Self.doubleValue(map.call(method: "zoom", args: nil)) else { return nil }
-        let bearing = Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0
+        let bearing = CameraBearing.bearingFromNativeHeading(Self.doubleValue(map.call(method: "rotate", args: nil)) ?? 0)
         let camera = (center, LongdoViewController.longdoZoomToCore(longdoZoom), bearing)
         projectionCamera = camera
         return camera
@@ -266,6 +286,10 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
     }
 
     public func unbind() {
+        isStyleReady = false
+        didReady = false
+        pendingStyle = nil
+        pendingStyleDiagnostics = nil
         // 登録した capability を取り下げる。レジストリの持ち主は state で、ビューより長生きするため、
         // ここで外さないと破棄済みのコントローラを掴んだまま残る。
         state.serviceRegistry.removeProviderRegistrations()
@@ -418,6 +442,8 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         updateGestures(lastUISettings)
         bindEvents()
         overlayBinding?.markReady()
+        isStyleReady = true
+        applyStyle(pendingStyle, onDiagnostics: pendingStyleDiagnostics)
         controller?.notifyMapInitialized()
         onMapLoaded?(state)
         // Bubbles synced before ready were laid out while projection was unavailable
@@ -630,7 +656,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         MapCameraPosition(
             position: GeoPoint(latitude: latitude, longitude: longitude, altitude: 0),
             zoom: LongdoViewController.longdoZoomToCore(longdoZoom),
-            bearing: rotate,
+            bearing: CameraBearing.bearingFromNativeHeading(rotate),
             tilt: pitch,
             paddings: state.cameraPosition.paddings,
             // マーカークラスタリングは `visibleRegion.bounds` で表示範囲内のマーカーを
@@ -672,11 +698,14 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         // そこでは補正不要になり通常フローへ進む。android-sdk と同じく、補正した回は
         // state 更新もコールバックも行わない。
         if controller?.applyCameraRestrictionCorrectionIfNeeded(updated) == true { return }
-        state.updateCameraPosition(updated)
-        lastOverlayCamera = updated
-        overlayBinding?.setCurrentCamera(updated)
+        // 外へ出すのはターゲット（パディングを除いた領域の中央）。画面の投影とエコー判定は
+        // 地図が報告した中心（updated）のまま使う。
+        let reported = controller?.reportedCamera(updated) ?? updated
+        state.updateCameraPosition(reported)
+        lastOverlayCamera = reported
+        overlayBinding?.setCurrentCamera(reported)
         // クラスタは visibleRegion.bounds を使って再計算する。
-        Task { [weak self] in await self?.strategyManager.onCameraChanged(updated) }
+        Task { [weak self] in await self?.strategyManager.onCameraChanged(reported) }
         // Bubbles must track the map on every camera event, including suppressed echoes. During
         // a touch pan their container follows the UIKit gesture directly; updating their absolute
         // frames at the same time would apply both the geographic movement and the translation.
@@ -704,7 +733,7 @@ public final class LongdoMapHost: MapViewCoordinatorBase<LongdoViewState>, Longd
         if controller?.shouldSuppressCameraEcho(updated) == true { return }
 
         moveDispatcher.dispatch(
-            position: updated,
+            position: reported,
             onStart: { [weak self] pos in self?.controller?.notifyCameraMoveStart(pos); self?.onCameraMoveStart?(pos) },
             onMove: { [weak self] pos in self?.controller?.notifyCameraMove(pos); self?.onCameraMove?(pos) },
             onEnd: { [weak self] pos in self?.controller?.notifyCameraMoveEnd(pos); self?.onCameraMoveEnd?(pos) }

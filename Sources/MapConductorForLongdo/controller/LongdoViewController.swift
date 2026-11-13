@@ -1,6 +1,6 @@
 import CoreLocation
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// Bridges MapConductor core to the official Longdo Map iOS SDK (`LongdoMap`). Camera operations are
 /// issued through the SDK bridge (`location` / `zoom` / `rotate` / `pitch` / `bound`); overlays live
@@ -37,6 +37,12 @@ final class LongdoViewController: MapViewControllerProtocol {
     private var mapInitializedListener: OnMapInitializedHandler?
 
     private var mapReady = false
+    /// 直近の移動で要求されたパディング。Longdo のブリッジにはパディングが無いので、中心をずらして
+    /// 再現し（``CameraPaddingEmulation``）、読み戻しで逆にずらすときに使う。
+    private var lastPaddings: MapPaddingsProtocol?
+
+    /// Longdo の地図は MapLibre GL で描いている（`map.Renderer`）ので、縦の視野角は MapLibre と同じ。
+    static let verticalFieldOfView: Double = 36.87
     private var pendingCameraPosition: MapCameraPosition?
 
     /// Echo-filter state: the camera we expect Longdo to report after the most recent
@@ -65,7 +71,13 @@ final class LongdoViewController: MapViewControllerProtocol {
 
     // MARK: - MapViewControllerProtocol
 
-    func clearOverlays() async {}
+    /// ``clearOverlays()`` の中身。オーバーレイのコントローラは `LongdoOverlayBinding` が持っているので、
+    /// バインディングが生成時に設定する（android-sdk と同じく、各コントローラの `clear()` を呼ぶ）。
+    var clearOverlaysHandler: (@MainActor () async -> Void)?
+
+    func clearOverlays() async {
+        await clearOverlaysHandler?()
+    }
 
     func setCameraMoveStartListener(listener: OnCameraMoveHandler?) { cameraMoveStartListener = listener }
     func setCameraMoveListener(listener: OnCameraMoveHandler?) { cameraMoveListener = listener }
@@ -76,6 +88,16 @@ final class LongdoViewController: MapViewControllerProtocol {
 
     func moveCamera(position: MapCameraPosition) {
         if mapReady { applyCamera(position) } else { pendingCameraPosition = position }
+    }
+
+    /// Longdo から読み戻したカメラ（画面中心）を、ターゲット・パディング・視野角を持つカメラへ戻す。
+    func reportedCamera(_ camera: MapCameraPosition) -> MapCameraPosition {
+        CameraPaddingEmulation.restored(
+            camera,
+            paddings: lastPaddings,
+            fov: Self.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.bounds.size
+        )
     }
 
     func animateCamera(position: MapCameraPosition, duration: Long) {
@@ -93,10 +115,24 @@ final class LongdoViewController: MapViewControllerProtocol {
         ]])
     }
 
+    /// Called after the base layer was switched; the overlay binding uses it to
+    /// put the raster layers back on top.
+    var baseLayerSwitched: (() -> Void)?
+
     /// Switches the base layer at runtime.
     func setMapDesignType(_ design: LongdoMapDesignType) {
         guard let bridge, mapReady else { return }
         bridge.call("Layers.setBase", args: [bridge.ldstatic("Layers", with: design.layerName)])
+        // The overlays only come back on the next move (measured: blank for
+        // 10 s after the switch, back after a pinch). Put them back on top
+        // once the new base is in, then make the move: one level in and out,
+        // unanimated, which lands on the same camera.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, let bridge = self.bridge else { return }
+            self.baseLayerSwitched?()
+            bridge.call("zoom", args: [true, false])
+            bridge.call("zoom", args: [false, false])
+        }
     }
 
     // MARK: - Camera application
@@ -107,8 +143,15 @@ final class LongdoViewController: MapViewControllerProtocol {
         let pitch: Double
     }
 
-    private func applyCamera(_ position: MapCameraPosition) {
+    private func applyCamera(_ requested: MapCameraPosition) {
         guard let bridge else { return }
+        // パディングの分だけ中心をずらしてから渡す。以下（エコー判定を含む）は中心の空間で扱う。
+        lastPaddings = requested.paddings
+        let position = CameraPaddingEmulation.applied(
+            to: requested,
+            fov: Self.verticalFieldOfView,
+            viewportSize: typedHolder.mapView.bounds.size
+        )
         let native = nativeCameraFor(position)
         // What we expect Longdo to report back for this apply, in core-camera terms
         // (nativeCameraFor may offset the target and flip the pitch sign for negative tilt;
@@ -125,7 +168,7 @@ final class LongdoViewController: MapViewControllerProtocol {
         echoUnconvergedEvents = 0
         bridge.call("location", args: [native.target.clLocation, false])
         bridge.call("zoom", args: [native.longdoZoom, false])
-        bridge.call("rotate", args: [position.bearing, false])
+        bridge.call("rotate", args: [CameraBearing.toNativeHeading(position.bearing), false])
         bridge.call("pitch", args: [native.pitch])
     }
 
@@ -138,7 +181,7 @@ final class LongdoViewController: MapViewControllerProtocol {
         let tiltAbsRad = tiltAbsDeg * .pi / 180.0
         let altitude = zoomConverter.zoomLevelToAltitude(zoomLevel: position.zoom, latitude: position.position.latitude, tilt: 0.0)
         let distanceForward = altitude * tan(tiltAbsRad)
-        let target = Spherical.computeOffset(origin: position.position, distance: distanceForward, heading: position.bearing)
+        let target = Spherical.computeOffset(origin: position.position, distance: distanceForward, heading: CameraBearing.toNativeHeading(position.bearing))
         return NativeCamera(target: target, longdoZoom: longdoZoom, pitch: tiltAbsDeg)
     }
 

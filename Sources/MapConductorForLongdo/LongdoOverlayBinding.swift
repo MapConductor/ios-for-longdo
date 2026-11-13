@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import MapConductorCore
+@_spi(MapConductorDriver) import MapConductorCore
 
 /// Owns and drives the Longdo overlay controllers, all using the official SDK's native overlay
 /// objects (`longdo.Polyline` / `Polygon` / `Circle` / `Marker` / `Rectangle` / `Layer`):
@@ -22,9 +22,19 @@ final class LongdoOverlayBinding {
 
     /// カスケードの実行先。`MapViewControllerProtocol.dispatchOverlayTap` を呼ぶ。
     private weak var mapController: LongdoViewController?
+    /// `clearOverlays()` で strategy（クラスタリングなど）のマーカーも消すために引く。持ち主は state。
+    private weak var serviceRegistry: MapServiceRegistry?
 
     private var ready = false
     private var lastMarkers: [MarkerState] = []
+    /// 同じ一覧の再送を入口で帰す門番（他プロバイダの `syncMarkers` と同じ）。
+    ///
+    /// SwiftUI はカメラが動くたびに content を送り直してくる。以前はそのたびに全件を
+    /// 振り分けて指紋を比べていたので、14.4 万本の街路樹では 1 回 850ms ほどメイン
+    /// スレッドが止まり、パン中に何度も挟まって操作が重くなっていた。
+    /// 一覧が同じあいだのマーカー個別の変更は、``LongdoMarkerTileRenderer`` と
+    /// ``LongdoMarkerController`` がそれぞれの購読で拾う。
+    private var markerListIdentity = MarkerListIdentity()
 
     /// クラスタリングが接続されている間の描画対象。`nil` のときは通常の `content.markers`。
     ///
@@ -42,8 +52,14 @@ final class LongdoOverlayBinding {
     /// Renders large, non-interactive marker sets as raster tiles (created on demand).
     private var markerTileRenderer: LongdoMarkerTileRenderer?
 
-    init(bridge: LongdoBridge, scope: MapOverlayScope, controller: LongdoViewController) {
+    init(
+        bridge: LongdoBridge,
+        scope: MapOverlayScope,
+        controller: LongdoViewController,
+        serviceRegistry: MapServiceRegistry
+    ) {
         self.bridge = bridge
+        self.serviceRegistry = serviceRegistry
         self.scope = scope
         self.polylineController = LongdoPolylineController(bridge: bridge)
         self.polygonController = LongdoPolygonController(bridge: bridge)
@@ -61,6 +77,39 @@ final class LongdoOverlayBinding {
         controller.registerOverlayController(polygonController)
         controller.registerOverlayController(groundImageController)
         controller.registerOverlayController(rasterController)
+        controller.baseLayerSwitched = { [weak rasterController] in rasterController?.reattachAll() }
+        controller.clearOverlaysHandler = { [weak self] in await self?.clearOverlays() }
+        // Many polygons are drawn into raster tiles and shown as one raster
+        // layer; taps still resolve against the original shapes.
+        let polygonTiler = PolygonTiler()
+        polygonTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: PolygonTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(PolygonTiler.layerId)
+            }
+        }
+        polygonController.tiler = polygonTiler
+        // Many polylines likewise, in their own raster layer in the polyline band
+        // (under the natively drawn polylines); taps still resolve against the original lines.
+        let polylineTiler = PolylineTiler()
+        polylineTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: PolylineTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(PolylineTiler.layerId)
+            }
+        }
+        polylineController.tiler = polylineTiler
+        let circleTiler = CircleTiler()
+        circleTiler.onTemplate = { [weak rasterController] template, tileSize in
+            if let template {
+                await rasterController?.upsert(state: CircleTiler.rasterLayerState(template: template, tileSize: tileSize))
+            } else {
+                await rasterController?.removeById(CircleTiler.layerId)
+            }
+        }
+        circleController.tiler = circleTiler
 
         scope.polylineCollector.setShouldApply { [weak self] in self?.ready ?? false }
         scope.polygonCollector.setShouldApply { [weak self] in self?.ready ?? false }
@@ -78,11 +127,17 @@ final class LongdoOverlayBinding {
     func sync(_ content: MapViewContent) {
         scope.polylineCollector.sync(content.polylines.map { $0.state })
         scope.polygonCollector.sync(content.polygons.map { $0.state })
+        polygonController.tiler?.refreshIfServerMoved()
+        if polylineController.tiler?.setOptions(content.polylineTilingOptions) == true { scope.polylineCollector.flush() }
+        if circleController.tiler?.setOptions(content.circleTilingOptions) == true { scope.circleCollector.flush() }
+        polylineController.tiler?.refreshIfServerMoved()
+        circleController.tiler?.refreshIfServerMoved()
         scope.circleCollector.sync(content.circles.map { $0.state })
         scope.groundImageCollector.sync(content.groundImages.map { $0.state })
         scope.rasterLayerCollector.sync(content.rasterLayers.map { $0.state })
-        lastMarkers = content.markers.map { $0.state }
         lastTiling = content.markerTilingOptions
+        guard markerListIdentity.shouldProcess(content.markers) else { return }
+        lastMarkers = content.markers.map { $0.state }
         if ready { applyMarkers() }
     }
 
@@ -133,13 +188,23 @@ final class LongdoOverlayBinding {
     private func ensureMarkerTileRenderer() -> LongdoMarkerTileRenderer {
         if let markerTileRenderer { return markerTileRenderer }
         let renderer = LongdoMarkerTileRenderer(bridge: bridge, tilingOptions: lastTiling)
+        // タイル担当のマーカーがドラッグ可能・アニメーション付きになったら、DOM の経路へ
+        // 移すために振り分け直す。
+        renderer.onRouteChanged = { [weak self] in
+            guard let self, self.ready else { return }
+            self.applyMarkers()
+        }
         markerTileRenderer = renderer
         return renderer
     }
 
     func setCurrentCamera(_ camera: MapCameraPosition) {
         lastCamera = camera
+        // 回したら DOM マーカーの重なり順を付け直す（同じ zIndex なら画面で下ほど手前）。
+        // タイルに焼いたマーカーは北が上のまま。
+        markerController.applyDrawOrderFrame(MarkerDrawOrder.Frame(camera: camera))
         polylineController.setCurrentCameraPosition(camera)
+        circleController.setCurrentCameraPosition(camera)
     }
 
     /// Current state for a marker id (used by the info-bubble coordinator to resolve icons).
@@ -159,13 +224,12 @@ final class LongdoOverlayBinding {
     }
 
     /// Hit-tests a map click against markers; returns true when a marker consumed the tap.
-    /// Interactive DOM markers are tested first, then (for large sets) the tiled markers via a
-    /// geo-distance hit-test at the current native zoom.
+    /// Interactive DOM markers are tested first, then (for large sets) the tiled markers, both with
+    /// the core ``MarkerHitTest/pick`` rule.
     func handleMarkerTap(_ point: GeoPoint) -> Bool {
         if markerController.handleTap(point) { return true }
-        if let tileRenderer = markerTileRenderer, let camera = lastCamera {
-            let nativeZoom = LongdoViewController.coreZoomToLongdo(camera.zoom)
-            if let hit = tileRenderer.findMarkerAt(point, nativeZoom: nativeZoom) {
+        if let tileRenderer = markerTileRenderer, let project = markerController.projector {
+            if let hit = tileRenderer.findMarkerAt(point, project: project) {
                 if hit.clickable { hit.onClick?(hit) }
                 return true
             }
@@ -213,6 +277,20 @@ final class LongdoOverlayBinding {
     /// コアの `dispatchOverlayTap` に寄せて、どちらも直る。
     func handleTap(_ point: GeoPoint) -> Bool {
         mapController?.dispatchOverlayTap(position: point) ?? false
+    }
+
+    /// android-sdk の `clearOverlays()` と同じく、各オーバーレイのコントローラを空にする。
+    /// `LongdoViewController.clearOverlaysHandler` から呼ばれる。
+    func clearOverlays() async {
+        markerController.clear()
+        markerTileRenderer?.clear()
+        await polylineController.clear()
+        await polygonController.clear()
+        await groundImageController.clear()
+        await circleController.clear()
+        await rasterController.clear()
+        // strategy（クラスタリングなど）が描いたマーカーも消す。
+        await serviceRegistry?.clearMarkerRendering()
     }
 
     func unbind() {
