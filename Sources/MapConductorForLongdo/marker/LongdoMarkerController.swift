@@ -410,17 +410,15 @@ final class LongdoMarkerController {
     }
 
     private func subscribe(_ marker: MarkerState) {
-        subscriptions[marker.id] = marker.asFlow()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self, self.states[marker.id] != nil else { return }
-                // During a custom drag the native overlay is moved directly; rebuilding it
-                // here for every position change would flicker and fight the drag.
-                if self.draggingMarkerId == marker.id { return }
-                self.addOrUpdate(marker)
-                self.applyStackOrderIfNeeded()
-                self.maybeStartAnimation(marker)
-            }
+        subscriptions[marker.id] = marker.onChange { [weak self] in
+            guard let self, self.states[marker.id] != nil else { return }
+            // During a custom drag the native overlay is moved directly; rebuilding it
+            // here for every position change would flicker and fight the drag.
+            if self.draggingMarkerId == marker.id { return }
+            self.addOrUpdate(marker)
+            self.applyStackOrderIfNeeded()
+            self.maybeStartAnimation(marker)
+        }
     }
 
     private func nearestMarker(to coord: CLLocationCoordinate2D) -> (String, MarkerState)? {
